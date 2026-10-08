@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class XmlRpcTransportClient(BaseTransportClient):
-    """XML-RPC transport backend for Odoo 16-19 compatibility.
+    """XML-RPC transport backend for Odoo 18 and below.
 
     This is the broad-compatibility path and remains the default transport.
     It preserves the old object-service calling convention: positional args plus

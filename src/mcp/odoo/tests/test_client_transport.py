@@ -101,14 +101,18 @@ class TestTransportSelection:
 
         assert client.transport_name == "xmlrpc"
 
-    def test_legacy_no_argument_local_path_reads_the_configured_transport(self, creds, monkeypatch):
-        monkeypatch.setenv("ODOO_TRANSPORT", "json2")
+    @pytest.mark.parametrize("transport", [None, "xmlrpc", "json2"])
+    def test_legacy_no_argument_local_path_reads_the_configured_transport(self, creds, monkeypatch, transport):
+        if transport is None:
+            monkeypatch.delenv("ODOO_TRANSPORT", raising=False)
+        else:
+            monkeypatch.setenv("ODOO_TRANSPORT", transport)
         monkeypatch.setattr(client_module, "get_odoo_credentials", lambda: creds)
         monkeypatch.setattr(json2_transport.httpx, "AsyncClient", FakeAsyncClient)
 
         client = OdooClient()
 
-        assert client.transport_name == "json2"
+        assert client.transport_name == (transport or "xmlrpc")
 
     def test_explicit_credentials_require_a_profile_selected_transport(self, creds):
         with pytest.raises(ValueError, match="require an explicit transport"):
@@ -200,6 +204,32 @@ class TestJson2Transport:
 
 
 class TestXmlRpcTransportCompatibility:
+    @pytest.mark.asyncio
+    async def test_legacy_default_authenticates_and_reads_odoo_18(self, creds, monkeypatch):
+        calls = []
+
+        class CommonProxy(FakeXmlRpcCommonProxy):
+            def version(self):
+                return {"server_version": "18.0"}
+
+        class ObjectProxy:
+            def execute_kw(self, *args):
+                calls.append(args)
+                return 0
+
+        # Exercise the real XML-RPC facade and method encoding through the
+        # default local path without contacting a production database.
+        def proxy(url, context=None):
+            return CommonProxy() if url.endswith("/common") else ObjectProxy()
+
+        monkeypatch.delenv("ODOO_TRANSPORT", raising=False)
+        monkeypatch.setattr(client_module, "get_odoo_credentials", lambda: creds)
+        monkeypatch.setattr(xmlrpc_transport.xmlrpc.client, "ServerProxy", proxy)
+        async with OdooClient() as client:
+            assert client.transport_name == "xmlrpc"
+            assert await client.search_count("res.partner", [["id", "=", 0]]) == 0
+        assert calls == [("demo-db", 11, "stored-api-key", "res.partner", "search_count", [[["id", "=", 0]]], {})]
+
     @pytest.mark.asyncio
     async def test_xmlrpc_rejected_for_odoo_19_or_above(self, creds, monkeypatch):
         monkeypatch.setattr(xmlrpc_transport.xmlrpc.client, "ServerProxy", fake_server_proxy_for_v19)

@@ -7,6 +7,7 @@ Outputs are written to dist/client-configs/ and intended for release artifacts.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,13 @@ def _normalize_server(manifest: dict) -> tuple[str, list[str], dict[str, str]]:
     command = str(mcp_cfg.get("command", "uv"))
     args = [str(a) for a in mcp_cfg.get("args", [])]
     env = {str(k): str(v) for k, v in (mcp_cfg.get("env") or {}).items()}
+    # Extension user_config interpolation is unavailable in standalone client
+    # snippets. Emit usable defaults there; users can select their local transport.
+    for key, value in env.items():
+        setting = re.fullmatch(r"\$\{user_config\.(\w+)\}", value)
+        if setting:
+            default = manifest["user_config"][setting.group(1)]["default"]
+            env[key] = str(default).lower() if isinstance(default, bool) else str(default)
     return command, args, env
 
 

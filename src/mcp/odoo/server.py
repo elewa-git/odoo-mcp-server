@@ -1114,7 +1114,7 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
         ]
     else:
         compatibility_hints = [
-            "XML-RPC remains the default compatibility transport for Odoo 16-19.",
+            "XML-RPC remains the default compatibility transport for Odoo 18 and below.",
         ]
 
     return {
