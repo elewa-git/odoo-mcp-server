@@ -51,8 +51,18 @@ jobs:
       - name: Install and import the clean wheel
         run: |
           uv venv .venv-artifact
-          uv pip install --python .venv-artifact/bin/python dist/*.whl
+          uv pip install --python .venv-artifact/bin/python dist/*.whl pytest pytest-asyncio
           .venv-artifact/bin/python -c "from src.mcp.odoo.server import mcp; assert mcp.name == 'odoo_mcp'"
+
+      - name: Verify clean wheel over stdio
+        run: |
+          # Running outside the checkout prevents source files from masking
+          # missing wheel files or incompatible freshly resolved dependencies.
+          SMOKE_DIR="$(mktemp -d)"
+          cp src/mcp/odoo/tests/test_stdio_protocol.py "$SMOKE_DIR/test_stdio_protocol.py"
+          ARTIFACT_PYTHON="$PWD/.venv-artifact/bin/python"
+          cd "$SMOKE_DIR"
+          "$ARTIFACT_PYTHON" -m pytest -q test_stdio_protocol.py
 
       - name: Inspect Python artifact contents
         run: |

@@ -111,6 +111,52 @@ You may fork this repository to review or distribute plugin metadata, but the re
 
 ## Updates and troubleshooting
 
+### Match the SDK to the installed server
+
+Version 2.0.0 in this checkout intentionally uses MCP SDK 2 (`mcp>=2.0,<3`)
+and imports `MCPServer`. Older servers that import `mcp.server.fastmcp` require
+SDK 1. Installing SDK 2 into those older environments produces
+`ModuleNotFoundError: No module named 'mcp.server.fastmcp'` before Odoo
+authentication can start. Changing the API key cannot fix that import failure.
+
+To repair an existing isolated **SDK 1 server** environment without upgrading
+the server, use the environment's Python executable. SDK 1.30.0 has been
+verified with the older local Elewa installation; this is not a claim that
+every SDK 1 release supports its APIs.
+
+macOS, for the existing isolated Elewa runtime:
+
+```bash
+uv pip install --python "$HOME/.local/share/elewa-odoo-mcp/runtime/bin/python" 'mcp==1.30.0'
+uv pip check --python "$HOME/.local/share/elewa-odoo-mcp/runtime/bin/python"
+"$HOME/.local/share/elewa-odoo-mcp/runtime/bin/python" -I "$HOME/.local/share/elewa-odoo-mcp/verify_elewa.py"
+```
+
+Windows PowerShell, from the directory containing an older server's `.venv`:
+
+```powershell
+uv pip install --python .\.venv\Scripts\python.exe 'mcp==1.30.0'
+uv pip check --python .\.venv\Scripts\python.exe
+.\.venv\Scripts\python.exe -c "from mcp.server.fastmcp import FastMCP; from src.mcp.odoo.server import mcp"
+```
+
+These commands repair dependencies only. An import check does not prove a
+successful MCP handshake or that the client loaded the connection. Verify
+initialization, tool discovery, and a read-only diagnostic call before changing
+client configuration. Keep existing client allowlists and write policy gates.
+For this checkout's SDK 2 release, install the built package so its own dependency
+constraint is applied; do not apply the SDK 1 repair commands to version 2.0.0.
+
+The external Elewa verifier at `~/.local/share/elewa-odoo-mcp/verify_elewa.py`
+is not a repository installer. Its diagnostics were repaired separately with a
+backup: dependency/import validation, Odoo authentication, per-model read checks,
+MCP initialization, discovery, and read-only ping each have a separate stage.
+`src/mcp/odoo/utils/startup_diagnostics.py` contains the tested formatter used by
+that repair. It unwraps nested failures and extracts missing-module names from
+captured subprocess stderr, while withholding arbitrary exception messages,
+traceback source lines, and response bodies. Verification output goes to stderr;
+server stdout remains reserved for MCP protocol messages.
+
 - Prefer versioned release assets over the rolling `latest-main` prerelease for regular users.
 - After a local update, restart the local MCP client so it loads the new process.
 - If `odoo_ping` fails, verify the selected profile's URL, database, login email, API-key status, and transport version rule.
