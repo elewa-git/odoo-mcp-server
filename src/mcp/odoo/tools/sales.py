@@ -9,10 +9,8 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from src.mcp.odoo.connection.client import OdooClient
 
 # ── Shared ──
 
@@ -148,7 +146,7 @@ SAFE_OPPORTUNITY_FIELDS = frozenset({
 # ── Registration ──
 
 
-def register(mcp: FastMCP, get_odoo: Any) -> None:
+def register(mcp: MCPServer, get_odoo: Any) -> None:
     """Register all sales & pre-sales tools on the shared MCP server.
 
     Args:

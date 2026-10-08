@@ -2,8 +2,8 @@
   "manifest_version": "0.4",
   "name": "odoo-mcp-server",
   "display_name": "Odoo MCP Server",
-  "version": "1.0.5",
-  "description": "Give Claude safe local access to your Odoo CRM and projects so it can search records, review context, draft approved updates, and log internal notes, while blocking deletes and external messages.",
+  "version": "2.0.0",
+  "description": "Give MCP clients safe, profile-bound Odoo access with out-of-band credential onboarding and exact write approvals.",
   "icon": "assets/logo.png",
   "author": {
     "name": "Elewa"
@@ -20,7 +20,6 @@
         "src/mcp/odoo/server.py"
       ],
       "env": {
-        "ODOO_TRANSPORT": "${user_config.odoo_transport}",
         "ODOO_MCP_ENABLE_WRITES": "${user_config.enable_writes}",
         "ODOO_MCP_ENABLE_SELF_UPDATE": "${user_config.enable_self_update}"
       }
@@ -37,17 +36,10 @@
     }
   },
   "user_config": {
-    "odoo_transport": {
-      "type": "string",
-      "title": "Odoo transport",
-      "description": "Choose xmlrpc for Odoo 18 and below, or json2 for Odoo 19 and above.",
-      "required": true,
-      "default": "json2"
-    },
     "enable_writes": {
       "type": "boolean",
       "title": "Enable writes to Odoo",
-      "description": "Allow approved create/update operations to execute against Odoo. When off, the server is read-only and write tools fail closed. Every write still requires explicit in-conversation approval. Restart the extension after changing this.",
+      "description": "Allow exact, principal-bound approved create/update operations to execute against Odoo. When off, write tools fail closed. Restart the extension after changing this.",
       "required": false,
       "default": false
     },
@@ -69,6 +61,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/italanta/odoo-mcp-server"
+    "url": "https://github.com/elewa-git/odoo-mcp-server"
   }
 }

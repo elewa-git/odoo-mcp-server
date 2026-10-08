@@ -35,20 +35,28 @@ class OdooClient:
     do not mix XML-RPC and JSON-2 within the same session.
     """
 
-    _model_id_cache: dict[str, int] = {}
-
     def __init__(self, credentials: OdooCredentials | None = None, transport: str | None = None):
         """
-        Initialize with credentials from per-user config file (default) or explicit credentials.
+        Initialize from legacy local configuration or an explicit connection binding.
 
         Args:
-            credentials: Optional explicit credentials. If None, reads from get_odoo_credentials().
-            transport: Optional explicit transport. If None, reads ODOO_TRANSPORT.
+            credentials: Explicit credentials for a profile-bound connection. If
+                omitted, the legacy local configuration is used.
+            transport: Transport pinned by the profile-bound factory. It is
+                required when explicit credentials are supplied; the no-argument
+                legacy local path still reads ODOO_TRANSPORT.
         """
-        # Resolve credentials and transport once up front so one OdooClient maps
-        # to one consistent connection strategy for its entire lifetime.
-        self._creds = credentials or get_odoo_credentials()
-        self._transport_name = (transport or transport_from_env()).strip().lower()
+        # An explicit credential object must carry its profile-selected transport.
+        # Falling back to process state here could connect the same credentials
+        # through a transport selected for an unrelated profile.
+        if credentials is not None and transport is None:
+            raise ValueError("Explicit Odoo credentials require an explicit transport.")
+
+        # Keep the zero-argument path during the local-stdio migration. It is
+        # deliberately the only path allowed to read credentials or transport
+        # selection from this process's environment and local configuration.
+        self._creds = credentials if credentials is not None else get_odoo_credentials()
+        self._transport_name = (transport if transport is not None else transport_from_env()).strip().lower()
         # Safety checks stay at the facade level so the policy is applied no
         # matter which transport backend ultimately sends the request.
         self._safety = SafetyGuard()
@@ -56,6 +64,9 @@ class OdooClient:
         # transport-specific construction logic out of this business-facing API.
         self._transport = build_transport_client(self._creds, self._transport_name)
         self._uid: int | None = None
+        # Odoo model IDs are database-specific. Keep the cache on this exact
+        # client so one profile cannot reuse another profile's model identifier.
+        self._model_id_cache: dict[str, int] = {}
 
     @property
     def db(self) -> str:
@@ -221,8 +232,8 @@ class OdooClient:
 
     async def _get_model_id(self, model_name: str) -> int:
         """Get the ir.model ID for a model name (cached)."""
-        # Cache model ids at the facade level because they are transport-agnostic
-        # and often reused by activity creation or similar helpers.
+        # Cache model IDs only for this bound client. Numeric IDs are not safe to
+        # share between databases even when the Odoo model name is identical.
         if model_name in self._model_id_cache:
             return self._model_id_cache[model_name]
         result = await self.search_read("ir.model", [("model", "=", model_name)], ["id"], limit=1)

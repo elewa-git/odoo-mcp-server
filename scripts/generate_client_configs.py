@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "manifest.json"
 OUT_DIR = ROOT / "dist" / "client-configs"
@@ -31,20 +30,15 @@ def _normalize_server(manifest: dict) -> tuple[str, list[str], dict[str, str]]:
     return command, args, env
 
 
-def _replace_dir_tokens(value: str) -> str:
-    # Replace bundle-time placeholders with the checked-out repository path so
-    # generated snippets can be used immediately in local client configs.
-    return value.replace("${__dirname}", str(ROOT))
-
-
-def _build_local_server(name: str, command: str, args: list[str], env: dict[str, str]) -> dict:
+def _build_local_server(name: str, env: dict[str, str]) -> dict:
     # Claude and OpenClaw both accept an mcpServers object keyed by server name.
-    # Reuse the same shape to avoid per-client duplication bugs.
+    # Point at the installed entry point so generated files never embed a
+    # maintainer's checkout path or depend on bundle-only placeholders.
     return {
         "mcpServers": {
             name: {
-                "command": _replace_dir_tokens(command),
-                "args": [_replace_dir_tokens(a) for a in args],
+                "command": "odoo-mcp-server",
+                "args": [],
                 "env": env,
             }
         }
@@ -54,19 +48,19 @@ def _build_local_server(name: str, command: str, args: list[str], env: dict[str,
 def main() -> None:
     manifest = _load_manifest()
     server_name = manifest.get("name", "odoo-mcp-server")
-    command, args, env = _normalize_server(manifest)
+    _, _, env = _normalize_server(manifest)
 
     # Ensure artifact output exists both locally and in CI.
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Claude Desktop JSON shape.
-    claude = _build_local_server("odoo", command, args, env)
+    claude = _build_local_server("odoo", env)
     (OUT_DIR / "claude_desktop_config.odoo.json").write_text(
         json.dumps(claude, indent=2) + "\n", encoding="utf-8"
     )
 
     # OpenClaw MCP config shape (JSON map of local stdio servers).
-    openclaw = _build_local_server("odoo", command, args, env)
+    openclaw = _build_local_server("odoo", env)
     (OUT_DIR / "openclaw_mcp_servers.json").write_text(
         json.dumps(openclaw, indent=2) + "\n", encoding="utf-8"
     )
@@ -76,15 +70,33 @@ def main() -> None:
     hermes_yaml = [
         "mcp_servers:",
         "  odoo:",
-        f"    command: \"{_replace_dir_tokens(command)}\"",
-        "    args:",
+        '    command: "odoo-mcp-server"',
+        "    args: []",
     ]
-    for arg in args:
-        hermes_yaml.append(f"      - \"{_replace_dir_tokens(arg)}\"")
     hermes_yaml.append("    env:")
     for k, v in env.items():
         hermes_yaml.append(f"      {k}: \"{v}\"")
     (OUT_DIR / "hermes_mcp_servers.yaml").write_text("\n".join(hermes_yaml) + "\n", encoding="utf-8")
+
+    # This is a deployment hand-off example, not an importable Cowork secret.
+    # OpenCrane must replace the placeholders and qualify OAuth/custody before use.
+    remote = {
+        "name": "odoo",
+        "transport": {
+            "type": "streamable-http",
+            "url": "https://YOUR_OPENCRANE_HOST/mcp",
+        },
+        "authentication": {
+            "type": "oauth2",
+            "audience": "YOUR_OPENCRANE_MCP_AUDIENCE",
+        },
+        "credential_boundary": "per-user-profile-custody",
+        "qualification_status": "requires-live-opencrane-qualification",
+    }
+    (OUT_DIR / "opencrane_remote_connector.example.json").write_text(
+        json.dumps(remote, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     # Small metadata file for installers/release notes.
     meta = {
@@ -93,6 +105,7 @@ def main() -> None:
             "claude_desktop_config.odoo.json",
             "openclaw_mcp_servers.json",
             "hermes_mcp_servers.yaml",
+            "opencrane_remote_connector.example.json",
         ],
     }
     (OUT_DIR / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")

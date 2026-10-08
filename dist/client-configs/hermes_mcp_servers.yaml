@@ -1,0 +1,7 @@
+mcp_servers:
+  odoo:
+    command: "odoo-mcp-server"
+    args: []
+    env:
+      ODOO_MCP_ENABLE_WRITES: "${user_config.enable_writes}"
+      ODOO_MCP_ENABLE_SELF_UPDATE: "${user_config.enable_self_update}"

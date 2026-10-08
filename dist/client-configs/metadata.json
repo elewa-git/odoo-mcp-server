@@ -1,0 +1,9 @@
+{
+  "bundle_name": "odoo-mcp-server",
+  "generated_files": [
+    "claude_desktop_config.odoo.json",
+    "openclaw_mcp_servers.json",
+    "hermes_mcp_servers.yaml",
+    "opencrane_remote_connector.example.json"
+  ]
+}

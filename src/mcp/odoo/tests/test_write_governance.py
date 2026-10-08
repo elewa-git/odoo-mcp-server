@@ -1,7 +1,8 @@
 import pytest
 
+from src.core.identity import LocalInstallationPrincipalProvider
+from src.core.sqlite_approval_repository import SqliteApprovalRepository
 from src.mcp.odoo import server
-from src.mcp.odoo.utils.write_approvals import ApprovalStore
 
 
 class FakeOdooClient:
@@ -40,16 +41,28 @@ class FakeContext:
 
 
 @pytest.fixture
-def isolated_governance(monkeypatch):
-    monkeypatch.setattr(server, "_approval_store", ApprovalStore(ttl_seconds=600))
-    monkeypatch.setattr(server, "_validated_payloads", {})
-
-
-@pytest.fixture
-def fake_ctx():
+def fake_ctx(tmp_path):
     fake_odoo = FakeOdooClient()
-    ctx = FakeContext(server.AppContext(odoo=fake_odoo, auth_error=None))
+    ctx = FakeContext(
+        server.AppContext(
+            odoo=fake_odoo,
+            auth_error=None,
+            session_db="profile-1",
+            principal_provider=LocalInstallationPrincipalProvider("test-user"),
+            approval_repository=SqliteApprovalRepository(tmp_path / "approvals.sqlite3"),
+        )
+    )
     return ctx, fake_odoo
+
+
+def _approved_call_payload(record_id: int = 42) -> server.OdooValidateWriteInput:
+    return server.OdooValidateWriteInput(
+        model="crm.lead",
+        operation="call",
+        method="message_post",
+        args=[record_id],
+        kwargs={"body": "hello", "message_type": "comment", "subtype_id": 2},
+    )
 
 
 class TestPreviewWrite:
@@ -65,7 +78,7 @@ class TestPreviewWrite:
 
 class TestValidateWrite:
     @pytest.mark.asyncio
-    async def test_validate_rejects_unknown_field(self, isolated_governance, fake_ctx):
+    async def test_validate_rejects_unknown_field(self, fake_ctx):
         ctx, _ = fake_ctx
         result = await server.odoo_validate_write(
             server.OdooValidateWriteInput(
@@ -81,7 +94,7 @@ class TestValidateWrite:
         assert "Unknown fields" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_validate_note_call_returns_token(self, isolated_governance, fake_ctx):
+    async def test_validate_note_call_returns_token(self, fake_ctx):
         ctx, _ = fake_ctx
         result = await server.odoo_validate_write(
             server.OdooValidateWriteInput(
@@ -99,7 +112,7 @@ class TestValidateWrite:
         assert result["metadata_used"] == {"live_odoo": False}
 
     @pytest.mark.asyncio
-    async def test_validate_rejects_delete_unlink_call(self, isolated_governance, fake_ctx):
+    async def test_validate_rejects_delete_unlink_call(self, fake_ctx):
         ctx, _ = fake_ctx
         result = await server.odoo_validate_write(
             server.OdooValidateWriteInput(
@@ -118,23 +131,16 @@ class TestValidateWrite:
 
 class TestExecuteApprovedWrite:
     @pytest.mark.asyncio
-    async def test_execute_fails_closed_when_env_disabled(self, isolated_governance, fake_ctx, monkeypatch):
+    async def test_execute_fails_closed_when_env_disabled(self, fake_ctx, monkeypatch):
         ctx, _ = fake_ctx
         monkeypatch.delenv("ODOO_MCP_ENABLE_WRITES", raising=False)
-        validate = await server.odoo_validate_write(
-            server.OdooValidateWriteInput(
-                model="crm.lead",
-                operation="call",
-                method="message_post",
-                args=[1],
-                kwargs={"body": "hello", "message_type": "comment", "subtype_id": 2},
-            ),
-            ctx,
-        )
+        payload = _approved_call_payload(1)
+        validate = await server.odoo_validate_write(payload, ctx)
 
         result = await server.odoo_execute_approved_write(
             server.OdooExecuteApprovedWriteInput(
                 approval_token=validate["approval"]["token"],
+                payload=payload,
                 confirm=True,
             ),
             ctx,
@@ -144,23 +150,16 @@ class TestExecuteApprovedWrite:
         assert "disabled" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_execute_runs_approved_call(self, isolated_governance, fake_ctx, monkeypatch):
+    async def test_execute_runs_approved_call(self, fake_ctx, monkeypatch):
         ctx, fake_odoo = fake_ctx
         monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
-        validate = await server.odoo_validate_write(
-            server.OdooValidateWriteInput(
-                model="crm.lead",
-                operation="call",
-                method="message_post",
-                args=[42],
-                kwargs={"body": "hello", "message_type": "comment", "subtype_id": 2},
-            ),
-            ctx,
-        )
+        payload = _approved_call_payload()
+        validate = await server.odoo_validate_write(payload, ctx)
 
         result = await server.odoo_execute_approved_write(
             server.OdooExecuteApprovedWriteInput(
                 approval_token=validate["approval"]["token"],
+                payload=payload,
                 confirm=True,
             ),
             ctx,
@@ -176,3 +175,16 @@ class TestExecuteApprovedWrite:
                 {"body": "hello", "message_type": "comment", "subtype_id": 2},
             )
         ]
+
+        replay = await server.odoo_execute_approved_write(
+            server.OdooExecuteApprovedWriteInput(
+                approval_token=validate["approval"]["token"],
+                payload=payload,
+                confirm=True,
+            ),
+            ctx,
+        )
+
+        assert replay["success"] is False
+        assert "already used" in replay["error"]
+        assert len(fake_odoo.executed) == 1

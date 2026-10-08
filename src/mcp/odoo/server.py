@@ -5,9 +5,8 @@ This server exposes foundational (generic) Odoo tools plus domain-specific tools
 registered from separate modules under ``src.mcp.odoo.tools``.
 
 A single ``OdooClient`` instance is shared via the lifespan context — all domain
-tool modules reuse it, avoiding duplicate connections. Credentials may hold more
-than one Odoo database; the active database is chosen per session (automatically
-when one is configured, via elicitation when several are).
+tool modules reuse it, avoiding duplicate connections. Legacy local credentials
+may hold more than one database; an explicit durable default selects among them.
 
 Prompts (read automatically by the assistant):
 - ``odoo_write_flow``         — Mandatory 3-step create/update flow.
@@ -15,8 +14,8 @@ Prompts (read automatically by the assistant):
 - ``odoo_safety_policy``      — What the server will and will not do.
 
 Resources:
-- ``odoo://models``              — List all available Odoo models.
-- ``odoo://model/{model_name}``  — Introspect a specific model's fields.
+- ``odoo://models/{database}``    — List models in an explicitly selected database.
+- ``odoo://model/{model_name}``   — Introspect a specific model's fields.
 
 Read tools:
 - ``odoo_ping``             — Validate connectivity and show authenticated user + active db.
@@ -33,18 +32,16 @@ Write tools (3-step, approval-gated, fail-closed):
 - ``odoo_log_internal_note``      — Post chatter notes with ``message_type='note'`` only.
 - ``odoo_schedule_activity``      — Create internal reminder activities.
 
-Writes are off by default and gated two ways: the ``ODOO_MCP_ENABLE_WRITES``
-environment flag (set via the extension's "Enable writes to Odoo" config), or
-``odoo_enable_session_writes`` which turns writes on for the current session only
-after explicit user consent — useful for batch inserts/updates without a restart.
+Writes are off by default and require the ``ODOO_MCP_ENABLE_WRITES`` server
+policy flag plus a durable exact approval. Protocol sessions never grant authority.
 Deletes and outbound email are never permitted.
 
-Database & session tools:
+Database compatibility tools:
 - ``odoo_setup_credentials``      — Add/update credentials for a database.
 - ``odoo_list_databases``         — List stored databases and the default.
-- ``odoo_switch_database``        — Switch the active database for the session.
-- ``odoo_enable_session_writes``  — Enable writes for this session (consent-gated).
-- ``odoo_disable_session_writes`` — Turn session writes back off.
+- ``odoo_switch_database``        — Persist and activate a legacy local default.
+- ``odoo_enable_session_writes``  — Deprecated compatibility alias; never grants authority.
+- ``odoo_disable_session_writes`` — Deprecated compatibility alias; no session state exists.
 - ``odoo_runtime_info``           — Runtime diagnostics and write status.
 
 Run:
@@ -54,23 +51,40 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import os
 from importlib import metadata
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import date as _date
+from dataclasses import dataclass, field
+from datetime import UTC, date as _date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from src.core.approvals import (
+    ApprovalRepository,
+    ApprovalRepositoryError,
+    UnavailableApprovalRepository,
+)
 from src.mcp.odoo.connection.client import OdooClient
+from src.mcp.odoo.connection.base_transport import transport_from_env
+from src.core.identity import (
+    LocalInstallationPrincipalProvider,
+    PrincipalProvider,
+    PrincipalUnavailableError,
+    UnavailablePrincipalProvider,
+)
+from src.core.onboarding import (
+    OnboardingProvider,
+    OnboardingUnavailableError,
+    UnavailableOnboardingProvider,
+)
+from src.core.sqlite_approval_repository import SqliteApprovalRepository
 from src.core.credentials import (
-    CONFIG_PATH,
-    store_odoo_credentials_file,
     setup_advice,
     list_databases,
     get_default_db,
@@ -85,12 +99,7 @@ from src.mcp.odoo.utils.update_manager import (
     default_repo,
     fetch_latest_release_or_tag,
 )
-from src.mcp.odoo.utils.write_approvals import ApprovalStore
-
-
-_approval_store = ApprovalStore(ttl_seconds=600)
-# Token -> validated payload map kept in process memory for same-session execution.
-_validated_payloads: dict[str, dict[str, Any]] = {}
+APPROVAL_PATH = Path.home() / ".config" / "odoo-mcp" / "approvals.sqlite3"
 
 
 def _truthy_env(name: str) -> bool:
@@ -108,18 +117,20 @@ class AppContext:
 
     odoo: OdooClient | None
     auth_error: str | None = None
-    session_db: str | None = None  # db chosen for this session via elicitation or explicit switch
-    session_writes: bool = False   # writes enabled for this session only via odoo_enable_session_writes
+    session_db: str | None = None  # Transitional local profile coordinate; not write authority.
+    principal_provider: PrincipalProvider = field(default_factory=UnavailablePrincipalProvider)
+    onboarding_provider: OnboardingProvider = field(default_factory=UnavailableOnboardingProvider)
+    approval_repository: ApprovalRepository = field(default_factory=UnavailableApprovalRepository)
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Initialize and share a single OdooClient for the server session.
 
     Never crash on auth failure — store the error on AppContext so every
     tool can return it to Claude, who will relay the setup instruction.
-    If multiple databases are configured, defer connection until the first
-    tool call so we can elicit a choice from the user.
+    If multiple legacy databases are configured, defer connection until the
+    first tool call resolves the durable default.
     """
     client: OdooClient | None = None
     auth_error: str | None = None
@@ -136,15 +147,21 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     elif len(dbs) == 0:
         # No credentials at all — let odoo_setup_credentials handle it.
         auth_error = None
-    # len(dbs) > 1: defer — _require_odoo will elicit the choice.
+    # len(dbs) > 1: defer; _require_odoo resolves only the durable default.
     try:
-        yield AppContext(odoo=client, auth_error=auth_error, session_db=session_db)
+        yield AppContext(
+            odoo=client,
+            auth_error=auth_error,
+            session_db=session_db,
+            principal_provider=LocalInstallationPrincipalProvider(getpass.getuser()),
+            approval_repository=SqliteApprovalRepository(APPROVAL_PATH),
+        )
     finally:
         if client is not None:
             await client.close()
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "odoo_mcp",
     lifespan=app_lifespan,
 )
@@ -167,15 +184,15 @@ Pass the payload from step 1. Runs safety checks and live schema validation agai
 On success returns an `approval.token` (short-lived, single-use). **Show the payload to the user and ask for explicit approval before proceeding.**
 
 ## Step 3 — Execute: `odoo_execute_approved_write`
-Pass the `approval_token` from step 2 and set `confirm=true`. This is the only step that writes to Odoo.
+Pass the `approval_token` and exact validated `payload` from step 2, then set `confirm=true`.
+This is the only step that writes to Odoo.
 `confirm=true` must reflect genuine user approval — never set it speculatively.
 Writes must also be enabled in the extension configuration; if not, execution fails with a clear error.
 
 ## Important
 - Approval tokens expire and are single-use. If a token expires before step 3, restart from step 1.
-- If `writes_currently_allowed: false` appears in `odoo_runtime_info`, writes are off. Two ways to enable:
-  - **Persistent:** open Claude Settings → Extensions → Odoo MCP Server → configuration, turn on "Enable writes to Odoo", and restart the extension (sets `ODOO_MCP_ENABLE_WRITES=1`).
-  - **This session only (good for batch inserts/updates):** call `odoo_enable_session_writes`. The user must confirm; no restart needed. Turn it back off with `odoo_disable_session_writes`.
+- If `writes_currently_allowed: false` appears in `odoo_runtime_info`, writes are off.
+  An administrator must enable the server policy gate; a protocol session cannot do so.
 """.strip()
 
 
@@ -183,17 +200,17 @@ Writes must also be enabled in the extension configuration; if not, execution fa
 def odoo_database_selection() -> str:
     """How to work with multiple Odoo databases in a session."""
     return """
-# Working with Odoo databases
+# Working with legacy local Odoo databases
 
 This server may hold credentials for more than one Odoo database.
 
-- **Which database am I connected to?** Call `odoo_ping` — the `db` field in the response is the active session database.
+- **Which database am I connected to?** Call `odoo_ping` — the `db` field is the active local default.
 - **What databases are available?** Call `odoo_list_databases` — it returns all stored databases and the file-level default.
-- **Switch databases:** Call `odoo_switch_database` with the target `db`. This reconnects the session and persists the new default.
-- **First call of a session:** If multiple databases are configured and none has been chosen yet, the server asks you (via elicitation) which one to use. Relay the user's choice — do not guess.
+- **Switch databases:** Call `odoo_switch_database` with the target `db`. This reconnects the local process and persists the new default.
+- **First call:** If multiple legacy databases are configured, the server uses the durable local default. Use `odoo_switch_database` to change it explicitly.
 - **Add a new database:** Call `odoo_setup_credentials`. The newly added database becomes the active default.
 
-When the user's request is database-specific and the session db is ambiguous, confirm which database before reading or writing.
+When a request is database-specific and the durable default is ambiguous, require an explicit selection before reading or writing.
 """.strip()
 
 
@@ -206,7 +223,7 @@ def odoo_safety_policy() -> str:
 This server is deliberately constrained:
 
 - **Reads are unrestricted** — search, read, count, and schema introspection are always available.
-- **Writes are gated** — create/update only via the 3-step write flow (`odoo_preview_write` → `odoo_validate_write` → `odoo_execute_approved_write`), each requiring explicit user approval, and only when writes are enabled — either persistently in the extension configuration or for the session via `odoo_enable_session_writes`.
+- **Writes are gated** — create/update only via the 3-step write flow (`odoo_preview_write` → `odoo_validate_write` → `odoo_execute_approved_write`), each requiring explicit user approval and the server policy gate. Protocol sessions never enable writes.
 - **No deletes** — there is no delete/unlink capability. Do not promise to delete records; suggest archiving, or doing it manually in Odoo.
 - **No outbound communication** — the SafetyGuard blocks email-type messages and other outbound channels. Only internal chatter notes (`message_type='note'`) are permitted, via `odoo_log_internal_note`. Do not attempt to send customer-facing email through write tools; it will be rejected.
 
@@ -214,12 +231,8 @@ If an operation is blocked, explain the constraint to the user rather than retry
 """.strip()
 
 
-class _DbChoice(BaseModel):
-    db: str = Field(..., description="Database name to use for this session")
-
-
 async def _require_odoo(ctx: Context) -> OdooClient | str:
-    """Return the active OdooClient, eliciting a db choice if multiple are configured.
+    """Return the active local Odoo client using only durable explicit selection.
 
     Returns the client, or an error string the tool should return directly.
     """
@@ -236,29 +249,16 @@ async def _require_odoo(ctx: Context) -> OdooClient | str:
     if not dbs:
         return "No Odoo credentials configured. " + setup_advice()
 
-    if len(dbs) == 1:
-        db = dbs[0]
-    else:
-        try:
-            result = await ctx.elicit(
-                f"Multiple Odoo databases are configured: {', '.join(dbs)}. "
-                "Which one should I use for this session?",
-                schema=_DbChoice,
-            )
-        except Exception:
-            return (
-                f"Multiple Odoo databases are configured: {', '.join(dbs)}. "
-                "Use odoo_switch_database to select one."
-            )
-        if result.action != "accept" or result.data is None:
-            return "No database selected. Use odoo_switch_database to pick one."
-        db = result.data.db
-        if db not in dbs:
-            return f"Unknown database '{db}'. Available: {', '.join(dbs)}."
+    db = dbs[0] if len(dbs) == 1 else get_default_db()
+    if db is None or db not in dbs:
+        return (
+            f"Multiple Odoo databases are configured: {', '.join(dbs)}. "
+            "Use odoo_switch_database to set a durable default explicitly."
+        )
 
     try:
         creds = get_odoo_credentials(db)
-        client = OdooClient(credentials=creds)
+        client = OdooClient(credentials=creds, transport=transport_from_env())
         await client.authenticate()
     except Exception as exc:
         return f"Failed to connect to database '{db}': {exc}"
@@ -271,20 +271,38 @@ async def _require_odoo(ctx: Context) -> OdooClient | str:
 # ── MCP Resources ──
 
 
-@mcp.resource("odoo://models", description="List all available models in the Odoo system")
-async def list_models(ctx: Context) -> str:
-    """Resource: list all installed Odoo model names."""
-    odoo = await _require_odoo(ctx)
-    if isinstance(odoo, str):
-        return odoo
-    records = await odoo.search_read(
-        "ir.model", [], fields=["model", "name"], limit=0
-    )
-    models = sorted(records, key=lambda r: r["model"])
-    return json.dumps(
-        {"count": len(models), "models": [{"model": r["model"], "name": r["name"]} for r in models]},
-        indent=2,
-    )
+@mcp.resource(
+    "odoo://models/{database}",
+    description="List all available models in one explicitly selected Odoo database",
+)
+async def list_models(database: str, ctx: Context) -> str:
+    """Resource: list installed model names without relying on prior session state."""
+    from src.core.credentials import get_odoo_credentials
+
+    try:
+        credentials = get_odoo_credentials(database)
+        odoo = OdooClient(credentials=credentials, transport=transport_from_env())
+        await odoo.authenticate()
+    except Exception as exc:
+        return json.dumps({"error": f"Failed to connect to database {database!r}: {exc}"})
+
+    try:
+        records = await odoo.search_read(
+            "ir.model", [], fields=["model", "name"], limit=0
+        )
+        models = sorted(records, key=lambda record: record["model"])
+        return json.dumps(
+            {
+                "count": len(models),
+                "models": [
+                    {"model": record["model"], "name": record["name"]}
+                    for record in models
+                ],
+            },
+            indent=2,
+        )
+    finally:
+        await odoo.close()
 
 
 @mcp.resource(
@@ -577,7 +595,26 @@ class OdooExecuteApprovedWriteInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     approval_token: str = Field(..., description="Token returned by odoo_validate_write")
+    payload: OdooValidateWriteInput = Field(
+        ...,
+        description="Exact validated payload shown to and approved by the user",
+    )
     confirm: bool = Field(..., description="Must be true to execute")
+
+
+def _canonical_write_payload(
+    input: OdooPreviewWriteInput | OdooValidateWriteInput,
+) -> dict[str, Any]:
+    """Build the one payload shape shared by preview, approval, and execution."""
+    return {
+        "model": input.model,
+        "operation": input.operation.strip().lower(),
+        "record_ids": input.record_ids,
+        "values": input.values,
+        "method": input.method,
+        "args": input.args,
+        "kwargs": input.kwargs,
+    }
 
 
 class OdooCheckForUpdateInput(BaseModel):
@@ -686,15 +723,7 @@ async def odoo_preview_write(input: OdooPreviewWriteInput) -> dict[str, Any]:
             "error": "method is required for call operations.",
         }
 
-    payload = {
-        "model": input.model,
-        "operation": operation,
-        "record_ids": input.record_ids,
-        "values": input.values,
-        "method": input.method,
-        "args": input.args,
-        "kwargs": input.kwargs,
-    }
+    payload = _canonical_write_payload(input)
     return {
         "success": True,
         "tool": "odoo_preview_write",
@@ -779,34 +808,49 @@ async def odoo_validate_write(input: OdooValidateWriteInput, ctx: Context) -> di
             "field_count": len(field_meta),
         }
 
-    payload = {
-        "model": input.model,
-        "operation": operation,
-        "record_ids": input.record_ids,
-        "values": input.values,
-        "method": input.method,
-        "args": input.args,
-        "kwargs": input.kwargs,
-    }
-    # Register short-lived single-use approval token bound to exact validated payload.
-    approval = _approval_store.register(payload)
-    _validated_payloads[approval.token] = payload
+    payload = _canonical_write_payload(input)
+    context: AppContext = ctx.request_context.lifespan_context
+    try:
+        principal = await context.principal_provider.resolve()
+        profile_id = context.session_db or odoo.db
+        # Legacy local credentials have no rotation metadata. Version 1 is an
+        # explicit migration fence until every call resolves an OdooProfile.
+        approval = await context.approval_repository.issue(
+            principal_id=principal.id,
+            profile_id=profile_id,
+            credential_version=1,
+            payload=payload,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    except (PrincipalUnavailableError, ApprovalRepositoryError):
+        return {
+            "success": False,
+            "tool": "odoo_validate_write",
+            "error": "Write approval authority is unavailable.",
+        }
     return {
         "success": True,
         "tool": "odoo_validate_write",
         "approval": {
             "token": approval.token,
-            "expires_at": approval.expires_at,
+            "expires_at": approval.expires_at.isoformat(),
             "requires_confirm": True,
         },
         "metadata_used": metadata_used,
-        "next": "Run odoo_execute_approved_write with approval_token and confirm=true.",
+        "next": (
+            "Run odoo_execute_approved_write with approval_token, this exact payload, "
+            "and confirm=true."
+        ),
     }
 
 
 @mcp.tool(
     name="odoo_execute_approved_write",
-    description="Write flow step 3 of 3 — call only after the user has explicitly approved the payload from step 2. Requires the approval_token from odoo_validate_write, confirm=true (set only with genuine user approval, never speculatively), and ODOO_MCP_ENABLE_WRITES=1 in the server environment. Fails closed on any unmet condition.",
+    description=(
+        "Write flow step 3 of 3 — call only after the user explicitly approves the payload from step 2. "
+        "Requires the approval_token, the exact validated payload, confirm=true, and the server write gate. "
+        "Fails closed on any mismatch, replay, expiry, or unavailable authority."
+    ),
     annotations={"title": "Execute Approved Write", "readOnlyHint": False, "destructiveHint": True},
 )
 async def odoo_execute_approved_write(input: OdooExecuteApprovedWriteInput, ctx: Context) -> dict[str, Any] | str:
@@ -819,17 +863,16 @@ async def odoo_execute_approved_write(input: OdooExecuteApprovedWriteInput, ctx:
             "error": "confirm must be true.",
         }
 
-    # Step 3 gate B: runtime gate required for any mutating execution. Either the
-    # persistent env flag, or a consent-gated session enablement, must be on.
+    # Step 3 gate B: a server policy gate is required for any mutating
+    # execution. Protocol sessions cannot create or retain write authority.
     context: AppContext = ctx.request_context.lifespan_context
-    if not (_truthy_env("ODOO_MCP_ENABLE_WRITES") or context.session_writes):
+    if not _truthy_env("ODOO_MCP_ENABLE_WRITES"):
         return {
             "success": False,
             "tool": "odoo_execute_approved_write",
             "error": (
-                "Write execution is disabled. Enable writes persistently via the extension "
-                "configuration ('Enable writes to Odoo'), or for this session only by calling "
-                "odoo_enable_session_writes."
+                "Write execution is disabled by server policy. An administrator must enable "
+                "the ODOO_MCP_ENABLE_WRITES gate. Protocol sessions cannot enable it."
             ),
         }
 
@@ -837,27 +880,25 @@ async def odoo_execute_approved_write(input: OdooExecuteApprovedWriteInput, ctx:
     if isinstance(odoo, str):
         return odoo
 
-    # Lookup the payload bound to this token during validation.
-    token = input.approval_token
-    payload = _validated_payloads.get(token)
-    if payload is None:
-        return {
-            "success": False,
-            "tool": "odoo_execute_approved_write",
-            "error": "Unknown approval token. Run odoo_validate_write first.",
-        }
-
-    # Step 3 gate C: token must be valid, unexpired, unused, and payload-matching.
+    # Step 3 gate C: atomically reserve an exact principal/profile/payload
+    # approval. No process-local map or protocol session grants authority.
+    payload = _canonical_write_payload(input.payload)
     try:
-        _approval_store.consume(token, payload)
-    except Exception:
+        principal = await context.principal_provider.resolve()
+        profile_id = context.session_db or odoo.db
+        await context.approval_repository.reserve(
+            input.approval_token,
+            principal_id=principal.id,
+            profile_id=profile_id,
+            credential_version=1,
+            payload=payload,
+        )
+    except (PrincipalUnavailableError, ApprovalRepositoryError):
         return {
             "success": False,
             "tool": "odoo_execute_approved_write",
             "error": "Approval token invalid, expired, already used, or does not match payload.",
         }
-    # Drop payload binding after token use to preserve single-use semantics.
-    _validated_payloads.pop(token, None)
 
     # Only validated operations are executable, with operation-specific execution path.
     operation = payload["operation"]
@@ -909,18 +950,15 @@ async def odoo_execute_approved_write(input: OdooExecuteApprovedWriteInput, ctx:
 
 
 class OdooSetupCredentialsInput(BaseModel):
-    """Input schema for user credential setup."""
+    """Start a safe onboarding flow or inspect one previously started flow."""
 
     model_config = ConfigDict(extra="forbid")
 
-    url: str = Field(..., description="Odoo URL, e.g. https://my.odoo.com")
-    db: str = Field(..., description="Odoo database name")
-    username: str = Field(..., description="Your Odoo login email")
-    api_key: str = Field(
-        ...,
+    onboarding_id: str | None = Field(
+        default=None,
         description=(
-            "Your Odoo API key (Settings > Users > API Keys tab). "
-            "Do not use your Odoo account password."
+            "Opaque ID from a previous call. Omit to start onboarding; provide it "
+            "to inspect the non-secret completion status."
         ),
     )
 
@@ -928,80 +966,33 @@ class OdooSetupCredentialsInput(BaseModel):
 @mcp.tool(
     name="odoo_setup_credentials",
     description=(
-        "Save Odoo credentials for a database so Odoo tools can connect on your behalf. "
-        "Can be run multiple times to add credentials for different databases — each database "
-        "is stored separately and the saved database becomes the active default. "
-        "Credentials are stored in ~/.config/odoo-mcp/ and are only accessible to you. "
-        "This tool requires an API key, not your login password. "
-        "To generate an API key: go to Odoo Settings > "
-        "Users > your profile > API Keys tab > New API Key."
+        "Begin or inspect credential onboarding outside the MCP conversation. "
+        "The returned HTTPS or loopback URL is owned by the configured custody provider; "
+        "Odoo API keys must be entered there and never in tool arguments or form elicitation."
     ),
     annotations={"title": "Set Up Odoo Credentials", "readOnlyHint": False, "destructiveHint": False},
 )
-async def odoo_setup_credentials(input: OdooSetupCredentialsInput, ctx: Context | None = None) -> str:
-    """Tool: write per-user Odoo credentials to ~/.config/odoo-mcp/credentials.json.
-
-    Validates the credentials against Odoo before storing them.
-    Does not require an existing authenticated session.
-    """
-    import re
-
-    # Basic input validation
-    if not re.match(r"^https?://", input.url):
-        return "Error: URL must start with https:// (e.g. https://my.odoo.com)"
-    if "@" not in input.username:
-        return "Error: username must be an email address"
-    if not input.db.strip():
-        return "Error: database name is required"
-    if not input.api_key.strip():
-        return "Error: API key is required"
-
-    # Validate credentials against Odoo before storing
-    from src.core.credentials import OdooCredentials
-
-    test_creds = OdooCredentials(
-        url=input.url.rstrip("/"),
-        db=input.db.strip(),
-        username=input.username.strip(),
-        api_key=input.api_key.strip(),
-    )
-    test_client = OdooClient(credentials=test_creds)
-    authenticated = False
+async def odoo_setup_credentials(
+    input: OdooSetupCredentialsInput,
+    ctx: Context,
+) -> dict[str, str | None]:
+    """Start or inspect provider-owned onboarding without handling credentials."""
+    context: AppContext = ctx.request_context.lifespan_context
     try:
-        await test_client.authenticate()
-        authenticated = True
-    except Exception as exc:
-        return (
-            f"Credentials rejected by Odoo: {exc}. "
-            "Double-check your URL, database name, email, and API key."
-        )
-    finally:
-        if not authenticated:
-            await test_client.close()
+        principal = await context.principal_provider.resolve()
+        if input.onboarding_id is not None:
+            result = await context.onboarding_provider.get_result(
+                principal,
+                input.onboarding_id,
+            )
+            return result.to_public_dict()
 
-    store_odoo_credentials_file(
-        url=test_creds.url,
-        db=test_creds.db,
-        username=test_creds.username,
-        api_key=test_creds.api_key,
-    )
-
-    if ctx is not None:
-        # Refresh the in-memory app context immediately so the current Claude
-        # session can start using Odoo without requiring an extension restart.
-        context: AppContext = ctx.request_context.lifespan_context
-        previous_client = context.odoo
-        context.odoo = test_client
-        context.auth_error = None
-        if previous_client is not None and previous_client is not test_client:
-            await previous_client.close()
-
-    all_dbs = list_databases()
-    return (
-        f"Credentials saved for {test_creds.username} on database '{test_creds.db}'. "
-        f"Stored databases: {', '.join(all_dbs)}. "
-        "Odoo tools are now active. Credentials persist across sessions."
-    )
+        continuation = await context.onboarding_provider.begin(principal)
+        return continuation.to_public_dict()
+    except PrincipalUnavailableError:
+        return {"status": "unavailable", "failure_code": "identity_unavailable"}
+    except OnboardingUnavailableError:
+        return {"status": "unavailable", "failure_code": "onboarding_unavailable"}
 
 
 class OdooSwitchDatabaseInput(BaseModel):
@@ -1050,7 +1041,7 @@ async def odoo_switch_database(input: OdooSwitchDatabaseInput, ctx: Context | No
         except RuntimeError as exc:
             return f"Default updated but failed to load credentials: {exc}"
 
-        new_client = OdooClient(credentials=new_creds)
+        new_client = OdooClient(credentials=new_creds, transport=transport_from_env())
         try:
             await new_client.authenticate()
         except Exception as exc:
@@ -1072,66 +1063,33 @@ async def odoo_switch_database(input: OdooSwitchDatabaseInput, ctx: Context | No
     )
 
 
-class _SessionWriteConsent(BaseModel):
-    confirm: bool = Field(..., description="Set true to allow writes for this session")
-
-
 @mcp.tool(
     name="odoo_enable_session_writes",
     description=(
-        "Enable Odoo writes for the current session only — useful before a batch of approved "
-        "inserts or updates without restarting the extension. Asks the user for explicit consent "
-        "(it cannot be enabled silently). Stays on until the session ends or odoo_disable_session_writes "
-        "is called. Each individual write still requires the full 3-step approval flow."
+        "Deprecated compatibility alias. MCP protocol sessions are not an authority boundary, "
+        "so this tool never enables writes. Use the server policy gate and exact approval flow."
     ),
     annotations={"title": "Enable Session Writes", "readOnlyHint": False, "destructiveHint": False},
 )
-async def odoo_enable_session_writes(ctx: Context) -> str:
-    """Tool: turn on writes for this session after explicit, human-confirmed consent."""
-    context: AppContext = ctx.request_context.lifespan_context
-    if _truthy_env("ODOO_MCP_ENABLE_WRITES"):
-        return "Writes are already enabled persistently via the extension configuration."
-    if context.session_writes:
-        return "Session writes are already enabled for this session."
-
-    try:
-        result = await ctx.elicit(
-            "Enable Odoo writes for THIS session only? Each individual write will still require the "
-            "3-step approval flow. This stays on until the extension restarts or you disable it.",
-            schema=_SessionWriteConsent,
-        )
-    except Exception:
-        return (
-            "This client does not support interactive confirmation, so session writes cannot be "
-            "enabled this way. Enable writes via Settings → Extensions → Odoo MCP Server → "
-            "'Enable writes to Odoo' instead, then restart the extension."
-        )
-
-    if result.action != "accept" or result.data is None or not result.data.confirm:
-        return "Session writes not enabled — no changes made."
-
-    context.session_writes = True
+async def odoo_enable_session_writes() -> str:
+    """Compatibility tool that deliberately cannot create session authority."""
     return (
-        "Session writes enabled for the duration of this session. Each write still goes through "
-        "odoo_preview_write → odoo_validate_write → odoo_execute_approved_write with explicit approval."
+        "Session write enablement was removed in MCP 2. Protocol sessions cannot grant write authority. "
+        "Use the administrator-controlled server policy gate and exact durable approval flow."
     )
 
 
 @mcp.tool(
     name="odoo_disable_session_writes",
-    description="Turn off writes that were enabled for the current session via odoo_enable_session_writes. Does not affect the persistent extension configuration.",
+    description=(
+        "Deprecated compatibility alias. MCP 2 keeps no session write authority, "
+        "so this tool performs no state change."
+    ),
     annotations={"title": "Disable Session Writes", "readOnlyHint": False, "destructiveHint": False},
 )
-async def odoo_disable_session_writes(ctx: Context) -> str:
-    """Tool: revoke session-level write enablement immediately."""
-    context: AppContext = ctx.request_context.lifespan_context
-    context.session_writes = False
-    if _truthy_env("ODOO_MCP_ENABLE_WRITES"):
-        return (
-            "Session writes turned off, but writes remain enabled persistently via the extension "
-            "configuration. To fully disable writes, turn off 'Enable writes to Odoo' and restart."
-        )
-    return "Session writes disabled. The server is now read-only for this session."
+async def odoo_disable_session_writes() -> str:
+    """Compatibility tool for clients that still call the removed session API."""
+    return "No session write authority exists in MCP 2; no state change was necessary."
 
 
 @mcp.tool(
@@ -1140,34 +1098,18 @@ async def odoo_disable_session_writes(ctx: Context) -> str:
     annotations={"title": "Odoo Runtime Diagnostics", "readOnlyHint": True, "destructiveHint": False},
 )
 async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
-    """Tool: help verify which plugin build/environment Claude is currently running."""
+    """Tool: report bounded runtime state without inspecting credential material."""
     context: AppContext = ctx.request_context.lifespan_context
     try:
         package_version = metadata.version("odoo-mcp-server")
     except Exception:
         package_version = "unknown"
 
-    config_path = Path(CONFIG_PATH)
-    file_exists = config_path.exists()
-    file_mode = None
-    stored_api_key_configured = False
-    stored_databases: list[str] = []
-    stored_default_db: str | None = None
-    if file_exists:
-        file_mode = oct(config_path.stat().st_mode & 0o777)
-        try:
-            stored_databases = list_databases()
-            stored_default_db = get_default_db()
-            stored_api_key_configured = len(stored_databases) > 0
-        except Exception:
-            stored_api_key_configured = False
-
     configured_transport = os.environ.get("ODOO_TRANSPORT", "xmlrpc").strip().lower() or "xmlrpc"
-    env_api_key_configured = bool(os.environ.get("ODOO_API_KEY", "").strip())
     compatibility_hints: list[str] = []
     if configured_transport == "json2":
         compatibility_hints = [
-            "JSON-2 requires Odoo 19+ and an API key from ODOO_API_KEY or the stored credentials file.",
+            "JSON-2 requires Odoo 19+ and a credential lease from the configured custody provider.",
             "JSON-2 support covers core reads, internal note posting, and create/write mutations.",
         ]
     else:
@@ -1179,20 +1121,15 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
         "package": "odoo-mcp-server",
         "package_version": package_version,
         "server_module": __file__,
-        "credentials_backend": "file",
-        "credentials_path": str(config_path),
-        "credentials_file_exists": file_exists,
-        "credentials_file_mode": file_mode,
-        "credentials_databases": stored_databases,
-        "credentials_default_db": stored_default_db,
+        "credential_custody": "provider",
+        "credential_onboarding_available": not isinstance(
+            context.onboarding_provider,
+            UnavailableOnboardingProvider,
+        ),
         "odoo_transport": configured_transport,
-        "json2_env_api_key_configured": env_api_key_configured,
-        "json2_stored_api_key_configured": stored_api_key_configured,
-        "json2_api_key_available": env_api_key_configured or stored_api_key_configured,
         "transport_compatibility_hints": compatibility_hints,
         "write_execution_enabled": _truthy_env("ODOO_MCP_ENABLE_WRITES"),
-        "session_writes_enabled": context.session_writes,
-        "writes_currently_allowed": _truthy_env("ODOO_MCP_ENABLE_WRITES") or context.session_writes,
+        "writes_currently_allowed": _truthy_env("ODOO_MCP_ENABLE_WRITES"),
         "self_update_enabled": _truthy_env("ODOO_MCP_ENABLE_SELF_UPDATE"),
     }
 

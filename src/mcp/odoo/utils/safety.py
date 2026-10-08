@@ -12,7 +12,6 @@ import logging
 from typing import Any
 
 from src.mcp.odoo.utils.safety_blocked_methods import (
-    BLOCKED_MESSAGE_TYPES,
     BLOCKED_METHODS,
     BLOCKED_MODELS,
     INTERNAL_NOTE_SUBTYPE_ID,
@@ -105,8 +104,8 @@ class SafetyGuard:
             if subtype_xmlid and subtype_xmlid != "mail.mt_note":
                 raise SafetyViolation(
                     f"message_post(subtype_xmlid='{subtype_xmlid}')",
-                    f"Only 'mail.mt_note' subtype is allowed with message_type='note'. "
-                    f"Other subtypes may trigger notifications to followers."
+                    "Only 'mail.mt_note' subtype is allowed with message_type='note'. "
+                    "Other subtypes may trigger notifications to followers."
                 )
         # Odoo 19 path: message_type='comment' + subtype_id=2 (internal Note)
         elif message_type == "comment":
@@ -116,7 +115,7 @@ class SafetyGuard:
                 pass  # Safe: internal note via xmlid reference
             else:
                 raise SafetyViolation(
-                    f"message_post(message_type='comment')",
+                    "message_post(message_type='comment')",
                     f"message_type='comment' sends emails to followers/external contacts. "
                     f"For internal notes, use message_type='comment' with subtype_id={INTERNAL_NOTE_SUBTYPE_ID} "
                     f"(Odoo 19) or message_type='note' (Odoo 18)."

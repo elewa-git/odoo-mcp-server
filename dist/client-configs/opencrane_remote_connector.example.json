@@ -1,0 +1,13 @@
+{
+  "name": "odoo",
+  "transport": {
+    "type": "streamable-http",
+    "url": "https://YOUR_OPENCRANE_HOST/mcp"
+  },
+  "authentication": {
+    "type": "oauth2",
+    "audience": "YOUR_OPENCRANE_MCP_AUDIENCE"
+  },
+  "credential_boundary": "per-user-profile-custody",
+  "qualification_status": "requires-live-opencrane-qualification"
+}

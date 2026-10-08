@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -24,10 +23,10 @@ class Json2TransportClient(BaseTransportClient):
 
     def __init__(self, credentials: OdooCredentials):
         super().__init__(credentials)
-        # JSON-2 uses bearer-token auth rather than uid/password pairs. We allow
-        # an explicit env override so operators can separate XML-RPC credentials
-        # from JSON-2 API keys when needed.
-        self._api_key = os.environ.get("ODOO_API_KEY", "").strip() or credentials.api_key
+        # JSON-2 uses bearer-token auth rather than uid/password pairs. The key
+        # comes only from this client binding so one profile cannot inherit a
+        # process-wide credential intended for another profile.
+        self._api_key = credentials.api_key
         self._user_id: int | None = None
         # Keep one async HTTP client per transport instance so headers, base URL,
         # and connection pooling are pinned for the whole session.
@@ -49,7 +48,8 @@ class Json2TransportClient(BaseTransportClient):
         return [
             "JSON-2 is supported in Odoo 19+.",
             "This transport maps core reads, internal note posting, and create/write mutations.",
-            "create/write mapping targets Odoo 19 JSON-2 semantics; validate with a single record if your instance rejects the request body.",
+            "create/write mapping targets Odoo 19 JSON-2 semantics; validate with a single record "
+            "if your instance rejects the request body.",
         ]
 
     async def authenticate(self) -> int:
@@ -57,8 +57,7 @@ class Json2TransportClient(BaseTransportClient):
         # first real proof of validity is making authenticated HTTP requests.
         if not self._api_key:
             raise ConnectionError(
-                "JSON-2 transport requires ODOO_API_KEY or credentials.api_key. "
-                + setup_advice()
+                "JSON-2 transport requires credentials.api_key. " + setup_advice()
             )
 
         # Query Odoo's replacement for the deprecated common-service version call

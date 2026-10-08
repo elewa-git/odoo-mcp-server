@@ -1,13 +1,13 @@
 {
   "name": "odoo-mcp-server",
   "description": "Odoo MCP server for CRM, projects, and safe staged write operations.",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "mcpServers": {
     "odoo": {
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/italanta/odoo-mcp-server@main",
+        "git+https://github.com/elewa-git/odoo-mcp-server@main",
         "odoo-mcp-server"
       ]
     }

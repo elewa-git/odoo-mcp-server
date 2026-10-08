@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  # Packaging and pull-request validation must not receive release authority.
+  contents: read
 
 jobs:
   pack:
@@ -17,6 +18,62 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install locked development environment
+        run: uv sync --locked --extra dev
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Check Python errors
+        # The rewrite fixes legacy formatting incrementally, while all concrete
+        # undefined-name and unused-import errors remain release blockers.
+        run: uv run ruff check --select F src tests scripts
+
+      - name: Verify generated client descriptors
+        run: |
+          uv run python scripts/generate_client_configs.py
+          git diff --exit-code -- dist/client-configs
+
+      - name: Build Python artifacts
+        run: uv build
+
+      - name: Install and import the clean wheel
+        run: |
+          uv venv .venv-artifact
+          uv pip install --python .venv-artifact/bin/python dist/*.whl pytest pytest-asyncio
+          .venv-artifact/bin/python -c "from src.mcp.odoo.server import mcp; assert mcp.name == 'odoo_mcp'"
+
+      - name: Verify clean wheel over stdio
+        run: |
+          # Running outside the checkout prevents source files from masking
+          # missing wheel files or incompatible freshly resolved dependencies.
+          SMOKE_DIR="$(mktemp -d)"
+          cp src/mcp/odoo/tests/test_stdio_protocol.py "$SMOKE_DIR/test_stdio_protocol.py"
+          ARTIFACT_PYTHON="$PWD/.venv-artifact/bin/python"
+          cd "$SMOKE_DIR"
+          "$ARTIFACT_PYTHON" -m pytest -q test_stdio_protocol.py
+
+      - name: Inspect Python artifact contents
+        run: |
+          if unzip -l dist/*.whl | grep -E 'tests/|__pycache__|\.pyc'; then
+            echo "Wheel contains development-only files."
+            exit 1
+          fi
+          if tar -tzf dist/*.tar.gz | grep -E 'tests/|__pycache__|\.pyc'; then
+            echo "Source distribution contains development-only files."
+            exit 1
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -29,12 +86,29 @@ jobs:
       - name: Validate and pack bundle
         run: mcpb pack
 
+      - name: Inspect MCPB file list
+        run: |
+          if unzip -l ./*.mcpb | grep -E '(\.git/|\.venv[^/]*/|__pycache__/|\.pyc|/tests/|credentials\.json|/dist/|AGENTS\.md|write_approvals\.py)'; then
+            echo "MCPB contains repository, environment, test, credential, or generated-state files."
+            exit 1
+          fi
+
+      - name: Inspect artifacts for local paths and credential configuration
+        run: |
+          if grep -R -E '/Users/|[A-Za-z]:\\Users\\|ODOO_API_KEY' dist/client-configs ./*.mcpb; then
+            echo "Generated artifacts contain a local path or credential configuration."
+            exit 1
+          fi
+
       - name: Generate client config snippets
         run: python3 scripts/generate_client_configs.py
 
       - name: Build release bundle archive
         run: |
+          # Pull-request merge refs contain a slash (for example, "123/merge").
+          # Keep the archive name portable and confined to the dist directory.
           VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA::7}}"
+          VERSION="${VERSION//\//-}"
           BUNDLE_NAME="odoo-mcp-server-${VERSION}-bundle"
 
           mkdir -p dist/release
@@ -43,6 +117,7 @@ jobs:
 
           (cd dist/release && zip -r "../${BUNDLE_NAME}.zip" .)
           sha256sum "dist/${BUNDLE_NAME}.zip" > "dist/${BUNDLE_NAME}.zip.sha256"
+          sha256sum --check "dist/${BUNDLE_NAME}.zip.sha256"
 
       - name: Upload MCPB artifact
         uses: actions/upload-artifact@v4
@@ -64,6 +139,47 @@ jobs:
             dist/*.zip
             dist/*.sha256
 
+      - name: Upload Python distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: odoo-mcp-server-python-dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+  release:
+    # Releases run separately so pull-request jobs retain read-only contents access.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch'
+    needs: pack
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download MCPB artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: odoo-mcp-server-mcpb
+          path: release/mcpb
+
+      - name: Download client config artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: odoo-mcp-server-client-configs
+          path: release/client-configs
+
+      - name: Download release bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: odoo-mcp-server-release-bundle
+          path: release/dist
+
+      - name: Download Python distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: odoo-mcp-server-python-dist
+          path: release/python-dist
+
       - name: Publish rolling prerelease (main)
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
@@ -74,10 +190,12 @@ jobs:
           make_latest: false
           target_commitish: ${{ github.sha }}
           files: |
-            ./*.mcpb
-            dist/client-configs/*
-            dist/*.zip
-            dist/*.sha256
+            release/mcpb/*.mcpb
+            release/client-configs/*
+            release/dist/*.zip
+            release/dist/*.sha256
+            release/python-dist/*.whl
+            release/python-dist/*.tar.gz
 
       - name: Create versioned release (tag push)
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -89,7 +207,9 @@ jobs:
           make_latest: true
           generate_release_notes: true
           files: |
-            ./*.mcpb
-            dist/client-configs/*
-            dist/*.zip
-            dist/*.sha256
+            release/mcpb/*.mcpb
+            release/client-configs/*
+            release/dist/*.zip
+            release/dist/*.sha256
+            release/python-dist/*.whl
+            release/python-dist/*.tar.gz

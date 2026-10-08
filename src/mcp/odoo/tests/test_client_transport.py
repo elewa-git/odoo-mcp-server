@@ -1,9 +1,9 @@
 import pytest
 
 from src.core.credentials import OdooCredentials
+from src.mcp.odoo.connection import client as client_module
+from src.mcp.odoo.connection import json2_transport, xmlrpc_transport
 from src.mcp.odoo.connection.client import OdooClient
-from src.mcp.odoo.connection import json2_transport
-from src.mcp.odoo.connection import xmlrpc_transport
 
 
 class FakeResponse:
@@ -38,7 +38,16 @@ class FakeAsyncClient:
         if path == "/json/2/crm.lead/search_read":
             return FakeResponse([{"id": 1, "name": "Deal"}])
         if path == "/json/2/res.users/read":
-            return FakeResponse([{"id": 7, "name": "Demo User", "email": "demo@example.com", "company_id": [1, "My Company"]}])
+            return FakeResponse(
+                [
+                    {
+                        "id": 7,
+                        "name": "Demo User",
+                        "email": "demo@example.com",
+                        "company_id": [1, "My Company"],
+                    }
+                ]
+            )
         if path == "/json/2/crm.lead/message_post":
             return FakeResponse(501)
         raise AssertionError(f"Unexpected POST {path}")
@@ -92,13 +101,18 @@ class TestTransportSelection:
 
         assert client.transport_name == "xmlrpc"
 
-    def test_env_transport_selects_json2(self, creds, monkeypatch):
+    def test_legacy_no_argument_local_path_reads_the_configured_transport(self, creds, monkeypatch):
         monkeypatch.setenv("ODOO_TRANSPORT", "json2")
+        monkeypatch.setattr(client_module, "get_odoo_credentials", lambda: creds)
         monkeypatch.setattr(json2_transport.httpx, "AsyncClient", FakeAsyncClient)
 
-        client = OdooClient(credentials=creds)
+        client = OdooClient()
 
         assert client.transport_name == "json2"
+
+    def test_explicit_credentials_require_a_profile_selected_transport(self, creds):
+        with pytest.raises(ValueError, match="require an explicit transport"):
+            OdooClient(credentials=creds)
 
 
 class TestJson2Transport:
@@ -106,7 +120,7 @@ class TestJson2Transport:
     async def test_json2_auth_and_core_read_mapping(self, creds, monkeypatch):
         FakeAsyncClient.instances = []
         monkeypatch.setattr(json2_transport.httpx, "AsyncClient", FakeAsyncClient)
-        monkeypatch.setenv("ODOO_API_KEY", "env-api-key")
+        monkeypatch.setenv("ODOO_API_KEY", "wrong-profile-api-key")
 
         client = OdooClient(credentials=creds, transport="json2")
         uid = await client.authenticate()
@@ -126,7 +140,7 @@ class TestJson2Transport:
         assert user["id"] == 7
 
         http = FakeAsyncClient.instances[0]
-        assert http.kwargs["headers"]["Authorization"] == "bearer env-api-key"
+        assert http.kwargs["headers"]["Authorization"] == "bearer stored-api-key"
         assert http.kwargs["headers"]["X-Odoo-Database"] == "demo-db"
         assert ("GET", "/web/version", None) in http.calls
         assert (
@@ -196,3 +210,32 @@ class TestXmlRpcTransportCompatibility:
             await client.authenticate()
 
         await client.close()
+
+
+class TestModelIdCacheIsolation:
+    @pytest.mark.asyncio
+    async def test_model_ids_are_not_shared_between_client_instances(self, creds):
+        first = OdooClient(credentials=creds, transport="xmlrpc")
+        second = OdooClient(credentials=creds, transport="xmlrpc")
+        first_calls = 0
+        second_calls = 0
+
+        async def first_search_read(*args, **kwargs):
+            nonlocal first_calls
+            first_calls += 1
+            return [{"id": 41}]
+
+        async def second_search_read(*args, **kwargs):
+            nonlocal second_calls
+            second_calls += 1
+            return [{"id": 72}]
+
+        first.search_read = first_search_read
+        second.search_read = second_search_read
+
+        assert await first._get_model_id("crm.lead") == 41
+        assert await first._get_model_id("crm.lead") == 41
+        assert await second._get_model_id("crm.lead") == 72
+        assert await second._get_model_id("crm.lead") == 72
+        assert first_calls == 1
+        assert second_calls == 1

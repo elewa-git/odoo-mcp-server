@@ -22,10 +22,10 @@ All write operations are **safety-checked** to prevent accidental outbound commu
 ## Key Features
 
 - ✅ **Safety-first**: Outbound communication blocker prevents emails, SMS, and invites
-- ✅ **Human-in-the-loop**: Write operations require upstream approval (Claude conversation)
+- ✅ **Human-in-the-loop**: Write operations require explicit staged approval and runtime gates
 - ✅ **Multi-company**: Supports Odoo's multi-company architecture
-- ✅ **Per-user credentials**: Each Claude user stores their own Odoo API credentials locally
-- ✅ **Async XML-RPC**: Non-blocking Odoo API calls
+- ✅ **Per-user credential boundary**: Odoo credentials are selected for one user/profile and kept out of prompts and tool arguments
+- ✅ **Version-aware Odoo transport**: XML-RPC for Odoo 18 and below; JSON-2 for Odoo 19 and above
 - ✅ **Fully typed**: Pydantic validation on all tool inputs
 - ✅ **Easy deployment**: Single `pip install` entry point
 
@@ -40,27 +40,20 @@ pip install odoo-mcp-server
 ### Via uv (fast Python installer)
 
 ```bash
-uvx --from https://github.com/italanta/odoo-mcp-server odoo-mcp-server
+uvx --from https://github.com/elewa-git/odoo-mcp-server odoo-mcp-server
 ```
 
 ## Setup
 
 Setup is centralized in [setup.md](setup.md).
 
-This project supports two hosting modes only:
+The primary organisation path is Claude Cowork through a reachable, OpenCrane-managed remote MCP connector with per-user OAuth and per-user Odoo credential custody. The secondary path is local stdio, which remains local-first and needs no hosted relay. A plugin repository is not remote hosting.
 
-1. Personal agent hosting on local machines via Claude Desktop, ClawdBot, and Hermes.
-2. Org-wide hosting on Claude Cowork via plugin installation from your own fork.
-
-See [setup.md](setup.md) for install steps, transport settings, update flow, and security guidance.
+See [setup.md](setup.md) for the current setup, onboarding, transport, rotation, and fail-closed availability rules.
 
 ## Hosted MCP Server Warning
 
-Do not host this package as a shared central MCP server for multiple users.
-
-Odoo access relies on private API tokens. Central hosting would concentrate those tokens in one service, creating unnecessary credential custody and lateral-access risk.
-
-This package is designed to run inside the supported harnesses documented in [setup.md](setup.md), where each user or managed plugin environment controls its own credentials.
+Do not expose a shared MCP process that can select or read arbitrary users' Odoo tokens. A remote deployment is acceptable only when OpenCrane authenticates each user, binds profile selection and credential release to that identity, and fails closed when the adapter or qualification is unavailable.
 
 ## Tools
 
@@ -77,7 +70,7 @@ This package is designed to run inside the supported harnesses documented in [se
 - `odoo_preview_write` — Build a canonical non-executing mutation payload
 - `odoo_validate_write` — Validate payload against SafetyGuard and live metadata (when applicable)
 - `odoo_execute_approved_write` — Execute only with token + confirm + env gate
-- `odoo_setup_credentials` — Save/update credentials
+- `odoo_setup_credentials` — Start or inspect secure credential onboarding
 - `odoo_check_for_update` — Check latest GitHub release/tag and suggest update command
 - `odoo_apply_self_update` — Apply local package update (guarded by explicit confirm + env gate)
 
@@ -94,11 +87,12 @@ Internal notes are the only direct mutation endpoint.
   - Applies `SafetyGuard` policy checks
   - Validates payload fields against live `fields_get` metadata for `create`/`write`
   - Issues a short-lived, single-use `approval_token`
-3. User approval in conversation
-  - Claude/Clawdbot must ask for explicit user confirmation before any execution step
+3. Explicit user approval
+  - The client presents the validated operation for approval before any execution step
   - The validated payload must be accepted by the user as-is
 4. `odoo_execute_approved_write`
   - Requires `confirm=true`
+  - Requires the exact validated payload alongside the approval token
   - Requires a valid unused token from step 2
   - Requires `ODOO_MCP_ENABLE_WRITES=1`
   - Executes only the validated operation (`create`, `write`, or `call`)
@@ -142,7 +136,7 @@ After successful self-update, restart the MCP host/client so the new package is 
 
 ### MCP Resources
 
-- `odoo://models` — List all available Odoo models
+- `odoo://models/{database}` — List models in an explicitly selected database
 - `odoo://model/{model_name}` — Introspect a specific model's fields and metadata
 
 ## Safety Guarantees
@@ -172,7 +166,7 @@ The **SafetyGuard** in `src/mcp/odoo/utils/safety.py` enforces blocklists define
                              ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │                       Odoo MCP Server                              │
-│  (FastMCP + Domain Tool Modules + SafetyGuard)                     │
+│  (MCPServer + Domain Tool Modules + SafetyGuard)                   │
 │                                                                    │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │ Generic Tools (search, read, diagnostics, staged writes, etc.)│  │
@@ -185,12 +179,12 @@ The **SafetyGuard** in `src/mcp/odoo/utils/safety.py` enforces blocklists define
 │  └──────────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │ OdooClient + SafetyGuard                                     │  │
-│  │  • Async XML-RPC calls                                       │  │
-│  │  • Credential management (~/.config/odoo-mcp/...)            │  │
+│  │  • XML-RPC (Odoo <=18) or JSON-2 (Odoo >=19)                │  │
+│  │  • Profile-bound credential custody                          │  │
 │  │  • Safety validation before all writes                       │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └────────────────────────────┬───────────────────────────────────────┘
-                             │ XML-RPC
+                             │ Version-aware Odoo transport
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          Odoo Instance                              │
@@ -240,7 +234,7 @@ README.md                   ← This file
 
 1. Create `src/mcp/odoo/tools/my_domain.py`:
    ```python
-   def register(mcp: FastMCP, get_odoo: Any) -> None:
+   def register(mcp: MCPServer, get_odoo: Any) -> None:
        """Register my domain tools on the shared MCP server."""
        
        @mcp.tool(name="odoo_my_tool", ...)
@@ -267,7 +261,7 @@ All writes go through staged validation and execution gates. **Never bypass this
 
 1. **Code layer** (`SafetyGuard`) — blocks dangerous models/methods
 2. **Validation layer** (`odoo_validate_write`) — enforces live schema checks and token issuance
-3. **Human layer** (Claude conversation) — explicit user approval before execution
+3. **Human layer** (approved client interaction) — explicit user approval before execution
 4. **Execution gates** (`odoo_execute_approved_write`) — requires `confirm=true`, valid token, and runtime env gate
 5. **Odoo layer** — Odoo's own permissions
 
@@ -293,10 +287,10 @@ All writes go through staged validation and execution gates. **Never bypass this
 ### "Credentials not found"
 
 ```
-Claude should prompt: Tell Claude: 'Set up my Odoo credentials'
+Use the secure local loopback/CLI onboarding flow, or the OpenCrane profile onboarding flow for Cowork.
 ```
 
-Credentials are stored in `~/.config/odoo-mcp/credentials.json`. If this file is missing or incomplete, run credential setup again.
+For local stdio, run `odoo-mcp-onboard`; the current transitional fallback writes the validated key to the existing owner-only local file. For Cowork, credentials must remain in the selected user's OpenCrane-backed custody. Do not paste an API key into chat to repair either path.
 
 ### "Odoo authentication failed"
 
@@ -326,5 +320,5 @@ MIT Open Source
 ## Support
 
 For questions, issues, or feature requests:
-- GitHub Issues: https://github.com/italanta/odoo-mcp-server/issues
+- GitHub Issues: https://github.com/elewa-git/odoo-mcp-server/issues
 - Email: jente@elewa.ke
