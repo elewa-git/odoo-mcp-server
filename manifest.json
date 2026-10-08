@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "odoo-mcp-server",
   "display_name": "Odoo MCP Server",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Give MCP clients safe, profile-bound Odoo access with out-of-band credential onboarding and exact write approvals.",
   "icon": "assets/logo.png",
   "author": {
