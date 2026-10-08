@@ -98,8 +98,11 @@ The MCP `odoo_setup_credentials` tool itself never accepts the API key. The loop
 
 The Claude extension's **Odoo transport** setting selects this for the transitional
 local credential-file runtime. Its default is `xmlrpc`; select `json2` for Odoo
-19 or above and restart the extension. Standalone client snippets also default to
-`xmlrpc`; change their `ODOO_TRANSPORT` environment value to `json2` for Odoo 19+.
+19 or above and restart the extension. Generated client templates preserve
+`${user_config.odoo_transport}` and the write/self-update user settings. For a
+client without `user_config` interpolation, replace these placeholders with your
+chosen values before use (`xmlrpc` or `json2` for transport; `false` for writes
+and self-update unless explicitly enabled).
 Terminal onboarding validates with the declared version's transport but does not
 persist that selection in the legacy credential file, so configure the launcher
 as well. Explicit profile-bound clients retain their own transport selection.
