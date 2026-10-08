@@ -36,8 +36,8 @@ def transport_for_odoo_major(odoo_major: int) -> str:
     """Select the only supported transport for a declared Odoo generation."""
     if odoo_major < 1:
         raise ValueError("Odoo major version must be a positive integer.")
-    # Odoo 19 removed XML-RPC endpoints, so accepting a caller-selected
-    # transport would create an unsafe compatibility bypass.
+    # The project's version policy requires JSON-2 for Odoo 19+. Pin the
+    # declared generation's transport rather than accepting an arbitrary override.
     return "xmlrpc" if odoo_major <= 18 else "json2"
 
 
