@@ -212,3 +212,20 @@ server stdout remains reserved for MCP protocol messages.
 - Never put raw Odoo API keys in conversations, prompts, plugin manifests, or shared configuration files.
 - Keep profiles, OAuth identity, and credential release bound to one user at a time.
 - A missing adapter, entitlement, profile, or live qualification is an unavailable state, not permission to bypass the boundary.
+
+### Release version fields
+
+For a product release, update `version` together in `manifest.json`,
+`pyproject.toml`, `.claude-plugin/plugin.json`, and the project's `uv.lock` entry.
+Keep `manifest_version` at `0.4`: it identifies the MCPB schema, not the product
+release. The packaging workflow uses the qualified MCPB CLI 2.1.2.
+
+Before tagging a release, run:
+
+```bash
+mcpb validate manifest.json
+mcpb pack
+uv lock --check
+```
+
+A `v2.0.4` tag triggers the versioned GitHub release workflow after review/merge.
