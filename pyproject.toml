@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "odoo-mcp-server"
-version = "2.0.5"
+version = "2.0.6"
 description = "Odoo MCP Server — Claude MCP tools for Odoo CRM, projects, and domain tools"
 readme = "README.md"
 requires-python = ">=3.11"

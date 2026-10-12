@@ -40,7 +40,7 @@ async def test_local_onboarding_pins_transport_and_persists_only_after_auth(majo
         return client
 
     result = await onboard_local_terminal(
-        input_fn=_input_values("https://odoo.example/", "mydb", "user@example.com", str(major) if major else ""),
+        input_fn=_input_values("https://odoo.example/", "mydb", "admin", str(major) if major else ""),
         getpass_fn=lambda _prompt: "api-key-that-must-stay-secret",
         output_fn=output.append,
         client_factory=client_factory,
@@ -53,7 +53,7 @@ async def test_local_onboarding_pins_transport_and_persists_only_after_auth(majo
     assert clients[0].closed is True
     assert persisted == [
         (
-            ("https://odoo.example", "mydb", "user@example.com", "api-key-that-must-stay-secret"),
+            ("https://odoo.example", "mydb", "admin", "api-key-that-must-stay-secret"),
             {"transport": expected_transport},
         )
     ]
@@ -77,7 +77,7 @@ async def test_local_onboarding_does_not_persist_or_echo_secret_when_authenticat
     assert result is None
     assert persisted == []
     assert secret not in "\n".join(output)
-    assert output == ["Authentication failed. Check the URL, database, email, API key, and Odoo version."]
+    assert output == ["Authentication failed. Check the URL, database, login, secret, and Odoo version."]
 
 
 def test_transport_for_odoo_major_rejects_invalid_version():
@@ -103,4 +103,4 @@ async def test_local_onboarding_rejects_insecure_remote_http_before_secret_input
 
     assert result is None
     assert secret_prompted is False
-    assert output == ["URL, database name, and login email are required; use HTTPS or local loopback HTTP."]
+    assert output == ["URL, database name, and login / username are required; use HTTPS or local loopback HTTP."]

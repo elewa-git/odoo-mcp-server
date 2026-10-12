@@ -340,7 +340,8 @@ button{{padding:.8rem 1.2rem}}</style><h1>Connect your Odoo database</h1>
 <form method="post"><input type="hidden" name="csrf" value="{csrf}">
 <label>Odoo URL<input name="url" type="url" placeholder="https://yourcompany.odoo.com" required></label>
 <label>Database name<input name="db" required></label>
-<label>Login email<input name="username" type="email" autocomplete="username" required></label>
+<label>Odoo login / username<input name="username" type="text" autocomplete="username" placeholder="admin or user@example.com" required></label>
+<p>Use the Login field of the database user, not their display name or Odoo.sh account.</p>
 <label>Odoo major version<input name="major" type="number" min="1" value="19"></label>
 <p>Transport is saved for this connection: XML-RPC for Odoo 18 and below, JSON-2 for Odoo 19+.
 If you leave the version blank, Odoo 19 is assumed.</p>

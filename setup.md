@@ -39,7 +39,7 @@ Validate with a non-production Odoo profile first:
 
 ### First use: create an Odoo profile
 
-For each user, onboarding collects an Odoo URL, database, login email, Odoo version/transport, and API key through the organisation's secure credential flow. The API key must never be pasted into chat, tool arguments, prompts, or a plugin configuration file.
+For each user, onboarding collects an Odoo URL, database, database login / username, Odoo version/transport, and API key through the organisation's secure credential flow. The API key must never be pasted into chat, tool arguments, prompts, or a plugin configuration file.
 
 The profile is bound to the authenticated user and an explicit profile identifier. The server must reject an absent, ambiguous, revoked, or cross-user profile selection. A successful onboarding validates the credential with Odoo before it is activated.
 
@@ -84,8 +84,14 @@ Add the generated client snippet from `dist/client-configs/` to your local MCP c
 In Claude Desktop (macOS or Windows), ask **"Create an Odoo connection"**.
 Claude calls `odoo_setup_credentials` and provides a link to a form on your own
 computer. Open that link in your browser and enter the Odoo URL, database name,
-login email, major version (defaults to 19), and API key or password. Enter the secret only in the form, never in
-chat. The form authenticates before saving and selects XML-RPC for Odoo 18 and
+database login / username, major version (defaults to 19), and API key or password. Enter the secret only in the form, never in
+chat. Use the database user's **Login** field (for example `admin`), not the
+user's display name (such as Administrator) or their Odoo.sh/GitHub account.
+Odoo's seeded administrator login is `admin`, but imported or customised
+instances can change it. Check Settings → Users & Companies → Users for the
+actual account. For Odoo 19 JSON-2, the API key identifies the authenticated
+user; the login label does not override the owner of that key.
+The form authenticates before saving and selects XML-RPC for Odoo 18 and
 below or JSON-2 for Odoo 19 and above.
 
 After saving, return to Claude and say **"Check the connection"**. Claude polls
@@ -244,7 +250,7 @@ server stdout remains reserved for MCP protocol messages.
 
 - Prefer versioned release assets over the rolling `latest-main` prerelease for regular users.
 - After a local update, restart the local MCP client so it loads the new process.
-- If `odoo_ping` fails, verify the selected profile's URL, database, login email, API-key status, and transport version rule.
+- If `odoo_ping` fails, verify the selected profile's URL, database, database login / username, API-key status, and transport version rule.
 - If remote Cowork setup is unavailable, ask the OpenCrane administrator to qualify the connector; do not substitute a shared API key or a repository import.
 
 ## Security reminder
