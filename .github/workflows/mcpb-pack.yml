@@ -81,7 +81,9 @@ jobs:
           node-version: "20"
 
       - name: Install MCPB CLI
-        run: npm install -g @anthropic-ai/mcpb
+        # Keep packaging on the CLI qualified with manifest schema 0.4.
+        # Product releases change `version`, not `manifest_version`.
+        run: npm install -g @anthropic-ai/mcpb@2.1.2
 
       - name: Validate and pack bundle
         run: mcpb pack
