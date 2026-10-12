@@ -83,6 +83,7 @@ from src.core.onboarding import (
     OnboardingUnavailableError,
     UnavailableOnboardingProvider,
 )
+from src.core.browser_onboarding import LocalBrowserOnboardingProvider
 from src.core.sqlite_approval_repository import SqliteApprovalRepository
 from src.core.credentials import (
     setup_advice,
@@ -121,6 +122,7 @@ class AppContext:
     principal_provider: PrincipalProvider = field(default_factory=UnavailablePrincipalProvider)
     onboarding_provider: OnboardingProvider = field(default_factory=UnavailableOnboardingProvider)
     approval_repository: ApprovalRepository = field(default_factory=UnavailableApprovalRepository)
+    completed_onboarding_id: str | None = None
 
 
 @asynccontextmanager
@@ -148,17 +150,20 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
         # No credentials at all — let odoo_setup_credentials handle it.
         auth_error = None
     # len(dbs) > 1: defer; _require_odoo resolves only the durable default.
+    principal_provider = LocalInstallationPrincipalProvider(getpass.getuser())
+    onboarding_provider = LocalBrowserOnboardingProvider(await principal_provider.resolve())
+    context = AppContext(
+        odoo=client, auth_error=auth_error, session_db=session_db,
+        principal_provider=principal_provider, onboarding_provider=onboarding_provider,
+        approval_repository=SqliteApprovalRepository(APPROVAL_PATH),
+    )
     try:
-        yield AppContext(
-            odoo=client,
-            auth_error=auth_error,
-            session_db=session_db,
-            principal_provider=LocalInstallationPrincipalProvider(getpass.getuser()),
-            approval_repository=SqliteApprovalRepository(APPROVAL_PATH),
-        )
+        yield context
     finally:
-        if client is not None:
-            await client.close()
+        await onboarding_provider.close()
+        # Onboarding/switching can replace the startup client during lifespan.
+        if context.odoo is not None:
+            await context.odoo.close()
 
 
 mcp = MCPServer(
@@ -258,7 +263,7 @@ async def _require_odoo(ctx: Context) -> OdooClient | str:
 
     try:
         creds = get_odoo_credentials(db)
-        client = OdooClient(credentials=creds, transport=transport_from_env())
+        client = OdooClient(credentials=creds, transport=creds.transport or transport_from_env())
         await client.authenticate()
     except Exception as exc:
         return f"Failed to connect to database '{db}': {exc}"
@@ -281,7 +286,7 @@ async def list_models(database: str, ctx: Context) -> str:
 
     try:
         credentials = get_odoo_credentials(database)
-        odoo = OdooClient(credentials=credentials, transport=transport_from_env())
+        odoo = OdooClient(credentials=credentials, transport=credentials.transport or transport_from_env())
         await odoo.authenticate()
     except Exception as exc:
         return json.dumps({"error": f"Failed to connect to database {database!r}: {exc}"})
@@ -969,6 +974,8 @@ class OdooSetupCredentialsInput(BaseModel):
         "Begin or inspect credential onboarding outside the MCP conversation. "
         "The returned HTTPS or loopback URL is owned by the configured custody provider; "
         "Odoo API keys must be entered there and never in tool arguments or form elicitation."
+        " Show the returned link to the user; after they complete the form, call this tool "
+        "with onboarding_id to activate the connection, then call odoo_ping. Existing databases are retained."
     ),
     annotations={"title": "Set Up Odoo Credentials", "readOnlyHint": False, "destructiveHint": False},
 )
@@ -985,6 +992,15 @@ async def odoo_setup_credentials(
                 principal,
                 input.onboarding_id,
             )
+            if result.status.value == "ready" and context.completed_onboarding_id != input.onboarding_id:
+                # The browser saved an authenticated default. Drop any stale
+                # client/error once, so the next read reconnects without restarting Claude.
+                if context.odoo is not None:
+                    await context.odoo.close()
+                context.odoo = None
+                context.auth_error = None
+                context.session_db = None
+                context.completed_onboarding_id = input.onboarding_id
             return result.to_public_dict()
 
         continuation = await context.onboarding_provider.begin(principal)
@@ -1041,7 +1057,7 @@ async def odoo_switch_database(input: OdooSwitchDatabaseInput, ctx: Context | No
         except RuntimeError as exc:
             return f"Default updated but failed to load credentials: {exc}"
 
-        new_client = OdooClient(credentials=new_creds, transport=transport_from_env())
+        new_client = OdooClient(credentials=new_creds, transport=new_creds.transport or transport_from_env())
         try:
             await new_client.authenticate()
         except Exception as exc:
@@ -1106,6 +1122,8 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
         package_version = "unknown"
 
     configured_transport = os.environ.get("ODOO_TRANSPORT", "xmlrpc").strip().lower() or "xmlrpc"
+    if context.odoo is not None:
+        configured_transport = context.odoo.transport_name
     compatibility_hints: list[str] = []
     if configured_transport == "json2":
         compatibility_hints = [

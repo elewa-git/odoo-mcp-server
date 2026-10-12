@@ -3,8 +3,8 @@ Credential management — config file per user.
 
 Credentials are stored in ~/.config/odoo-mcp/credentials.json (mode 600).
 
-Written by the 'odoo_setup_credentials' MCP tool — users set up credentials
-directly from a Claude conversation without needing shell access.
+Written by local browser or terminal onboarding after authentication. The MCP
+setup tool returns a browser continuation and never receives the API key.
 
 Each user in Claude Cowork gets their own sandbox home directory, so the
 file is naturally per-user and invisible to other users.
@@ -32,7 +32,9 @@ Usage:
 """
 
 import json
+import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,8 +45,9 @@ CONFIG_PATH = Path.home() / ".config" / "odoo-mcp" / "credentials.json"
 def setup_advice() -> str:
     """Return the canonical user-facing credential setup instruction."""
     return (
-        "Tell Claude: 'Set up my Odoo credentials'. "
-        "Claude will run the 'odoo_setup_credentials' tool and ask for url, db, username, and api_key."
+        "Ask Claude to create an Odoo connection. "
+        "Claude can run odoo_setup_credentials and provide a local browser setup link. "
+        "Enter login details and the API key in that form, never in chat."
     )
 
 
@@ -56,6 +59,7 @@ class OdooCredentials:
     db: str        # e.g. mydb
     username: str  # e.g. jente@mydb.com
     api_key: str   # Odoo API key (Settings > API Keys)
+    transport: str | None = None  # Older local entries still use the extension setting.
 
     def __repr__(self) -> str:
         """Never expose credentials in logs or repr."""
@@ -101,8 +105,17 @@ def _load_raw() -> dict:
 
 def _persist_credentials(data: dict) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600 — owner read/write only
+    # Create with owner-only permissions before writing any secret, then replace
+    # atomically so a crash cannot truncate existing database profiles.
+    fd, temporary = tempfile.mkstemp(dir=CONFIG_PATH.parent, prefix=".credentials-")
+    try:
+        with os.fdopen(fd, "w") as output:
+            output.write(json.dumps(data, indent=2))
+        os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temporary, CONFIG_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def get_odoo_credentials(db: str | None = None) -> OdooCredentials:
@@ -150,7 +163,11 @@ def get_odoo_credentials(db: str | None = None) -> OdooCredentials:
             + setup_advice()
         )
 
-    return OdooCredentials(url=url.rstrip("/"), db=target_db, username=username, api_key=api_key)
+    transport = entry.get("transport")
+    if transport is not None and transport not in {"xmlrpc", "json2"}:
+        raise RuntimeError("Stored Odoo transport must be xmlrpc or json2.")
+    return OdooCredentials(url=url.rstrip("/"), db=target_db, username=username, api_key=api_key,
+                           transport=transport)
 
 
 def list_databases() -> list[str]:
@@ -175,22 +192,21 @@ def get_default_db() -> str | None:
         return None
 
 
-def store_odoo_credentials_file(url: str, db: str, username: str, api_key: str) -> None:
+def store_odoo_credentials_file(url: str, db: str, username: str, api_key: str, *, transport: str | None = None) -> None:
     """Add or update a database entry in ~/.config/odoo-mcp/credentials.json.
 
     The saved database becomes the new default_db.
-    Called by the odoo_setup_credentials MCP tool.
+    Used only by local browser/terminal onboarding, never by MCP credential arguments.
     """
-    if CONFIG_PATH.exists():
-        try:
-            data = _load_raw()
-        except Exception:
-            data = {"databases": {}, "default_db": None}
-    else:
-        data = {"databases": {}, "default_db": None}
+    if transport is not None and transport not in {"xmlrpc", "json2"}:
+        raise ValueError("Odoo transport must be xmlrpc or json2.")
+    # An unreadable existing file must fail rather than erase unrelated profiles.
+    data = _load_raw() if CONFIG_PATH.exists() else {"databases": {}, "default_db": None}
 
     databases: dict = data.setdefault("databases", {})
     databases[db] = {"url": url, "username": username, "api_key": api_key}
+    if transport is not None:
+        databases[db]["transport"] = transport
     data["default_db"] = db
 
     _persist_credentials(data)

@@ -81,7 +81,29 @@ Add the generated client snippet from `dist/client-configs/` to your local MCP c
 
 ### Local credential onboarding
 
-Run the terminal fallback in the same operating-system user account as the MCP server:
+In Claude Desktop (macOS or Windows), ask **"Create an Odoo connection"**.
+Claude calls `odoo_setup_credentials` and provides a link to a form on your own
+computer. Open that link in your browser and enter the Odoo URL, database name,
+login email, major version, and API key. Enter the key only in the form, never in
+chat. The form authenticates before saving and selects XML-RPC for Odoo 18 and
+below or JSON-2 for Odoo 19 and above.
+
+After saving, return to Claude and say **"Check the connection"**. Claude polls
+`odoo_setup_credentials` with the returned `onboarding_id` and then calls
+`odoo_ping`. No terminal setup or Claude restart is required for this flow.
+The setup link expires after ten minutes and only works on the computer running
+the extension. If it has expired, ask Claude to create a new connection.
+
+Repeat the flow to add another database; previously saved databases are retained.
+Ask Claude to list connections with `odoo_list_databases` and select one with
+`odoo_switch_database`. Each browser-created database retains its validated
+transport, so an Odoo 18 and Odoo 19 database can coexist. The most recently
+saved/explicitly selected database is the durable default. Browser onboarding
+does not enable writes or self-update. The **Configure** extension button controls
+transport and policy settings; it is not the browser login form.
+
+If browser setup is unavailable, run the terminal fallback in the same
+operating-system user account as the MCP server:
 
 ```bash
 odoo-mcp-onboard
@@ -89,16 +111,19 @@ odoo-mcp-onboard
 
 On Windows PowerShell, the command is the same after `uv tool install`. Normal profile metadata is entered as terminal text; the API key is read with hidden `getpass` input, authenticated, and only then written to the existing owner-only legacy credentials file. This file adapter is transitional while OS credential-store support is implemented.
 
-The MCP `odoo_setup_credentials` tool itself never accepts the API key. The loopback and hosted onboarding adapters are not yet wired, so that tool reports unavailable in the current local composition; do not fall back to collecting an API key through the MCP conversation.
+The MCP `odoo_setup_credentials` tool itself never accepts the API key. Local
+stdio uses the loopback browser adapter. Hosted adapters must provide their own
+principal-bound provider; they must not reuse a local account's browser flow.
 
 ### Select the Odoo transport
 
 - Odoo 18 and below: `xmlrpc`
 - Odoo 19 and above: `json2`
 
-The Claude extension's **Odoo transport** setting selects this for the transitional
-local credential-file runtime. Its default is `xmlrpc`; select `json2` for Odoo
-19 or above and restart the extension. Generated client templates preserve
+The Claude extension's **Odoo transport** setting supplies the fallback for older
+local entries without a saved transport. Its default is `xmlrpc`; select `json2`
+for an older Odoo 19 entry and restart the extension. Browser-created connections
+save their own version-appropriate transport. Generated client templates preserve
 `${user_config.odoo_transport}` and the write/self-update user settings. For a
 client without `user_config` interpolation, replace these placeholders with your
 chosen values before use (`xmlrpc` or `json2` for transport; `false` for writes

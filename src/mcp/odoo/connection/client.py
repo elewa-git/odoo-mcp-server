@@ -56,7 +56,10 @@ class OdooClient:
         # deliberately the only path allowed to read credentials or transport
         # selection from this process's environment and local configuration.
         self._creds = credentials if credentials is not None else get_odoo_credentials()
-        self._transport_name = (transport if transport is not None else transport_from_env()).strip().lower()
+        # Browser-created local entries pin the validated database generation.
+        # The extension selector remains the fallback for older entries.
+        selected = transport if transport is not None else self._creds.transport
+        self._transport_name = (selected or transport_from_env()).strip().lower()
         # Safety checks stay at the facade level so the policy is applied no
         # matter which transport backend ultimately sends the request.
         self._safety = SafetyGuard()

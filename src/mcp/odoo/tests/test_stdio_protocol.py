@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 
+import httpx
 import pytest
 from mcp.client.stdio import stdio_client
 
@@ -35,6 +36,35 @@ async def test_stdio_initialize_discover_and_credentials_free_read(tmp_path):
             runtime = json.loads(result.content[0].text)
             assert runtime["write_execution_enabled"] is False
             assert runtime["self_update_enabled"] is False
+            assert runtime["credential_onboarding_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_starts_local_browser_onboarding(tmp_path):
+    # Start the installed composition in another process. No personal profiles
+    # or Odoo network access are involved in creating/reading an empty form.
+    code = (
+        "from pathlib import Path; from src.core import credentials; "
+        f"credentials.CONFIG_PATH = Path({str(tmp_path / 'missing.json')!r}); "
+        "from src.mcp.odoo import server; "
+        f"server.APPROVAL_PATH = Path({str(tmp_path / 'approvals.sqlite3')!r}); "
+        "server.main()"
+    )
+    params = StdioServerParameters(command=sys.executable, args=["-c", code])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write, read_timeout_seconds=20) as session:
+            await session.initialize()
+            setup = await session.call_tool("odoo_setup_credentials", {"input": {}})
+            assert not setup.is_error
+            flow = json.loads(setup.content[0].text)
+            async with httpx.AsyncClient(trust_env=False) as http:
+                form = await http.get(flow["url"])
+                assert form.status_code == 200
+                assert "Verify and connect" in form.text
+            status = await session.call_tool("odoo_setup_credentials", {
+                "input": {"onboarding_id": flow["onboarding_id"]},
+            })
+            assert json.loads(status.content[0].text)["status"] == "pending"
 
 
 @pytest.mark.asyncio
