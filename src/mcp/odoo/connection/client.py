@@ -22,7 +22,7 @@ Usage:
 from typing import Any
 
 from src.core.credentials import OdooCredentials, get_odoo_credentials, setup_advice
-from src.mcp.odoo.connection.base_transport import transport_from_env
+from src.mcp.odoo.connection.base_transport import transport_for_connection
 from src.mcp.odoo.connection.transport_factory import build_transport_client
 from src.mcp.odoo.utils.safety import SafetyGuard
 
@@ -44,7 +44,7 @@ class OdooClient:
                 omitted, the legacy local configuration is used.
             transport: Transport pinned by the profile-bound factory. It is
                 required when explicit credentials are supplied; the no-argument
-                legacy local path still reads ODOO_TRANSPORT.
+                local path reads the saved connection's transport, defaulting to JSON-2.
         """
         # An explicit credential object must carry its profile-selected transport.
         # Falling back to process state here could connect the same credentials
@@ -53,13 +53,13 @@ class OdooClient:
             raise ValueError("Explicit Odoo credentials require an explicit transport.")
 
         # Keep the zero-argument path during the local-stdio migration. It is
-        # deliberately the only path allowed to read credentials or transport
-        # selection from this process's environment and local configuration.
+        # deliberately the only path allowed to read credentials and transport
+        # selection from the local connection store.
         self._creds = credentials if credentials is not None else get_odoo_credentials()
-        # Browser-created local entries pin the validated database generation.
-        # The extension selector remains the fallback for older entries.
-        selected = transport if transport is not None else self._creds.transport
-        self._transport_name = (selected or transport_from_env()).strip().lower()
+        # Saved connection selection supports mixed Odoo generations without
+        # sharing a server-wide protocol switch.
+        selected = transport if transport is not None else transport_for_connection(self._creds)
+        self._transport_name = selected.strip().lower()
         # Safety checks stay at the facade level so the policy is applied no
         # matter which transport backend ultimately sends the request.
         self._safety = SafetyGuard()

@@ -25,7 +25,9 @@ def _input_values(*values):
     return lambda _prompt: next(iterator)
 
 
-@pytest.mark.parametrize(("major", "expected_transport"), [(18, "xmlrpc"), (19, "json2")])
+@pytest.mark.parametrize(
+    ("major", "expected_transport"), [(13, "xmlrpc"), (18, "xmlrpc"), (19, "json2"), (None, "json2")]
+)
 @pytest.mark.asyncio
 async def test_local_onboarding_pins_transport_and_persists_only_after_auth(major, expected_transport):
     output = []
@@ -38,18 +40,23 @@ async def test_local_onboarding_pins_transport_and_persists_only_after_auth(majo
         return client
 
     result = await onboard_local_terminal(
-        input_fn=_input_values("https://odoo.example/", "mydb", "user@example.com", str(major)),
+        input_fn=_input_values("https://odoo.example/", "mydb", "user@example.com", str(major) if major else ""),
         getpass_fn=lambda _prompt: "api-key-that-must-stay-secret",
         output_fn=output.append,
         client_factory=client_factory,
-        store_credentials=lambda *args: persisted.append(args),
+        store_credentials=lambda *args, **kwargs: persisted.append((args, kwargs)),
     )
 
     assert result is not None
     assert result.transport == expected_transport
     assert clients[0].transport == expected_transport
     assert clients[0].closed is True
-    assert persisted == [("https://odoo.example", "mydb", "user@example.com", "api-key-that-must-stay-secret")]
+    assert persisted == [
+        (
+            ("https://odoo.example", "mydb", "user@example.com", "api-key-that-must-stay-secret"),
+            {"transport": expected_transport},
+        )
+    ]
     assert "api-key-that-must-stay-secret" not in "\n".join(output)
 
 
@@ -96,6 +103,4 @@ async def test_local_onboarding_rejects_insecure_remote_http_before_secret_input
 
     assert result is None
     assert secret_prompted is False
-    assert output == [
-        "URL, database name, and login email are required; use HTTPS or local loopback HTTP."
-    ]
+    assert output == ["URL, database name, and login email are required; use HTTPS or local loopback HTTP."]

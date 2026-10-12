@@ -64,6 +64,8 @@ async def submit(http, url, *, db="demo", major="19", **overrides):
         api_key="synthetic-secret-key",
     )
     fields.update(overrides)
+    if major is None:
+        fields.pop("major")
     return await http.post(url, data=fields, headers={"Origin": str(httpx.URL(url).copy_with(path=""))})
 
 
@@ -74,7 +76,7 @@ async def test_real_mcp_start_form_poll_ping_and_switch_multiple_databases(isola
         assert runtime["credential_onboarding_available"] is True
         assert runtime["writes_currently_allowed"] is False
         async with httpx.AsyncClient(trust_env=False) as http:
-            for db, major, transport in [("old", "18", "xmlrpc"), ("new", "19", "json2")]:
+            for db, major, transport in [("old", "13", "xmlrpc"), ("new", "", "json2")]:
                 begin = (await mcp.call_tool("odoo_setup_credentials", {"input": {}})).structured_content
                 assert "synthetic-secret-key" not in json.dumps(begin)
                 response = await submit(http, begin["url"], db=db, major=major)
@@ -99,6 +101,7 @@ async def test_real_mcp_start_form_poll_ping_and_switch_multiple_databases(isola
     assert all(client.closed for client in FakeOdooClient.instances)
     assert credentials.CONFIG_PATH.stat().st_mode & 0o777 == 0o600
     assert credentials.get_odoo_credentials("new").transport == "json2"
+    assert credentials.get_odoo_credentials("old").transport == "xmlrpc"
 
 
 @pytest.mark.asyncio
@@ -170,3 +173,17 @@ def test_unreadable_credential_store_is_not_replaced(isolated):
     with pytest.raises(RuntimeError):
         credentials.store_odoo_credentials_file("https://example.com", "new", "user", "key", transport="json2")
     assert credentials.CONFIG_PATH.read_text() == "broken-json"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("major", ["", None])
+async def test_browser_defaults_blank_or_absent_version_to_odoo_19(isolated, major):
+    principal = await LocalInstallationPrincipalProvider("test").resolve()
+    provider = LocalBrowserOnboardingProvider(principal)
+    try:
+        flow = await provider.begin(principal)
+        async with httpx.AsyncClient(trust_env=False) as http:
+            assert (await submit(http, flow.url, major=major)).status_code == 200
+        assert credentials.get_odoo_credentials("demo").transport == "json2"
+    finally:
+        await provider.close()

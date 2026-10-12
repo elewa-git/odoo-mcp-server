@@ -71,7 +71,7 @@ from src.core.approvals import (
     UnavailableApprovalRepository,
 )
 from src.mcp.odoo.connection.client import OdooClient
-from src.mcp.odoo.connection.base_transport import transport_from_env
+from src.mcp.odoo.connection.base_transport import DEFAULT_ODOO_TRANSPORT, transport_for_connection
 from src.core.identity import (
     LocalInstallationPrincipalProvider,
     PrincipalProvider,
@@ -263,7 +263,7 @@ async def _require_odoo(ctx: Context) -> OdooClient | str:
 
     try:
         creds = get_odoo_credentials(db)
-        client = OdooClient(credentials=creds, transport=creds.transport or transport_from_env())
+        client = OdooClient(credentials=creds, transport=transport_for_connection(creds))
         await client.authenticate()
     except Exception as exc:
         return f"Failed to connect to database '{db}': {exc}"
@@ -286,7 +286,7 @@ async def list_models(database: str, ctx: Context) -> str:
 
     try:
         credentials = get_odoo_credentials(database)
-        odoo = OdooClient(credentials=credentials, transport=credentials.transport or transport_from_env())
+        odoo = OdooClient(credentials=credentials, transport=transport_for_connection(credentials))
         await odoo.authenticate()
     except Exception as exc:
         return json.dumps({"error": f"Failed to connect to database {database!r}: {exc}"})
@@ -1057,7 +1057,7 @@ async def odoo_switch_database(input: OdooSwitchDatabaseInput, ctx: Context | No
         except RuntimeError as exc:
             return f"Default updated but failed to load credentials: {exc}"
 
-        new_client = OdooClient(credentials=new_creds, transport=new_creds.transport or transport_from_env())
+        new_client = OdooClient(credentials=new_creds, transport=transport_for_connection(new_creds))
         try:
             await new_client.authenticate()
         except Exception as exc:
@@ -1121,7 +1121,7 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
     except Exception:
         package_version = "unknown"
 
-    configured_transport = os.environ.get("ODOO_TRANSPORT", "xmlrpc").strip().lower() or "xmlrpc"
+    configured_transport = DEFAULT_ODOO_TRANSPORT
     if context.odoo is not None:
         configured_transport = context.odoo.transport_name
     compatibility_hints: list[str] = []
@@ -1132,7 +1132,7 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
         ]
     else:
         compatibility_hints = [
-            "XML-RPC remains the default compatibility transport for Odoo 18 and below.",
+            "XML-RPC is selected per connection for Odoo 18 and below.",
         ]
 
     return {

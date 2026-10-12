@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -19,15 +18,13 @@ def parse_odoo_major(version_text: str) -> int | None:
     return int(digits)
 
 
-def transport_from_env() -> str:
-    # Resolve transport once from process config so the higher-level client can
-    # pin a single backend for its whole lifetime.
-    value = os.environ.get("ODOO_TRANSPORT", "xmlrpc").strip().lower()
-    if value not in {"xmlrpc", "json2"}:
-        raise RuntimeError(
-            f"Unsupported ODOO_TRANSPORT={value!r}. Use 'xmlrpc' or 'json2'."
-        )
-    return value
+DEFAULT_ODOO_TRANSPORT = "json2"
+
+
+def transport_for_connection(credentials: OdooCredentials) -> str:
+    # Connection metadata owns selection; an inherited server environment must
+    # never force every saved database onto the same protocol.
+    return credentials.transport or DEFAULT_ODOO_TRANSPORT
 
 
 class BaseTransportClient(ABC):
