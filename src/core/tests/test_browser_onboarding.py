@@ -194,7 +194,8 @@ async def test_browser_defaults_blank_or_absent_version_to_odoo_19(isolated, maj
 
 
 @pytest.mark.asyncio
-async def test_native_browser_submission_stores_locally_without_synthetic_origin_header(isolated):
+@pytest.mark.parametrize("username", ["admin", "Admin", "test@example.com"])
+async def test_native_browser_submission_stores_locally_without_synthetic_origin_header(isolated, username):
     principal = await LocalInstallationPrincipalProvider("test").resolve()
     provider = LocalBrowserOnboardingProvider(principal)
     try:
@@ -212,7 +213,7 @@ async def test_native_browser_submission_stores_locally_without_synthetic_origin
                 for name, value in dict(
                     url="https://example.odoo.com",
                     db="browser-db",
-                    username="test@example.com",
+                    username=username,
                     api_key="synthetic-key",
                 ).items():
                     await page.locator(f'[name="{name}"]').fill(value)
@@ -225,6 +226,7 @@ async def test_native_browser_submission_stores_locally_without_synthetic_origin
                 await browser.close()
         assert (await provider.get_result(principal, flow.onboarding_id)).status is OnboardingStatus.READY
         assert credentials.get_odoo_credentials("browser-db").transport == "json2"
+        assert credentials.get_odoo_credentials("browser-db").username == username
         assert credentials.CONFIG_PATH.stat().st_mode & 0o777 == 0o600
     finally:
         await provider.close()

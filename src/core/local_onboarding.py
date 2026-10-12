@@ -58,7 +58,7 @@ async def onboard_local_terminal(
     """
     url = input_fn("Odoo URL (for example https://my.odoo.com): ").strip().rstrip("/")
     db = input_fn("Odoo database name: ").strip()
-    username = input_fn("Odoo login email: ").strip()
+    username = input_fn("Odoo login / username: ").strip()
     major_text = input_fn("Odoo major version [19]: ").strip()
 
     try:
@@ -76,7 +76,7 @@ async def onboard_local_terminal(
         "localhost",
     }
     if (parsed_url.scheme != "https" and not is_loopback_http) or not parsed_url.netloc or not db or not username:
-        output_fn("URL, database name, and login email are required; use HTTPS or local loopback HTTP.")
+        output_fn("URL, database name, and login / username are required; use HTTPS or local loopback HTTP.")
         return None
 
     # getpass reads from the terminal without echoing; do not move this value
@@ -102,7 +102,7 @@ async def onboard_local_terminal(
     except Exception:
         # Authentication errors may include HTTP request details. Suppress them
         # rather than risking an API key reflected by a remote or client error.
-        output_fn("Authentication failed. Check the URL, database, email, API key, and Odoo version.")
+        output_fn("Authentication failed. Check the URL, database, login, secret, and Odoo version.")
         return None
     finally:
         # Close even after rejected authentication so a transient client cannot
