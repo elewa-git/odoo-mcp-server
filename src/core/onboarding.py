@@ -26,6 +26,10 @@ class OnboardingFailureCode(StrEnum):
     REJECTED = "rejected"
     UNAVAILABLE = "unavailable"
     VALIDATION_FAILED = "validation_failed"
+    INVALID_URL = "invalid_url"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    STORAGE_FAILED = "storage_failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)

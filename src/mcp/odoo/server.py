@@ -959,6 +959,8 @@ class OdooSetupCredentialsInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    restart: bool = Field(default=False, description="Replace a stuck local setup request with a fresh form.")
+
     onboarding_id: str | None = Field(
         default=None,
         description=(
@@ -975,7 +977,8 @@ class OdooSetupCredentialsInput(BaseModel):
         "The returned HTTPS or loopback URL is owned by the configured custody provider; "
         "Odoo API keys must be entered there and never in tool arguments or form elicitation."
         " Show the returned link to the user; after they complete the form, call this tool "
-        "with onboarding_id to activate the connection, then call odoo_ping. Existing databases are retained."
+        "with onboarding_id to activate the connection, then call odoo_ping. Existing databases are retained. "
+        "Use restart=true to replace a stuck local setup form."
     ),
     annotations={"title": "Set Up Odoo Credentials", "readOnlyHint": False, "destructiveHint": False},
 )
@@ -987,6 +990,10 @@ async def odoo_setup_credentials(
     context: AppContext = ctx.request_context.lifespan_context
     try:
         principal = await context.principal_provider.resolve()
+        if input.restart:
+            if isinstance(context.onboarding_provider, LocalBrowserOnboardingProvider):
+                return (await context.onboarding_provider.restart(principal)).to_public_dict()
+            return {"status": "unavailable", "failure_code": "onboarding_unavailable"}
         if input.onboarding_id is not None:
             result = await context.onboarding_provider.get_result(
                 principal,
@@ -1140,6 +1147,9 @@ async def odoo_runtime_info(ctx: Context) -> dict[str, Any]:
         "package_version": package_version,
         "server_module": __file__,
         "credential_custody": "provider",
+        "credential_storage": "local_file" if isinstance(
+            context.onboarding_provider, LocalBrowserOnboardingProvider
+        ) else "provider",
         "credential_onboarding_available": not isinstance(
             context.onboarding_provider,
             UnavailableOnboardingProvider,

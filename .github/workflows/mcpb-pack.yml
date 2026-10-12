@@ -33,7 +33,11 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run tests
-        run: uv run pytest -q
+        # Native browser POSTs generate Origin themselves; manually supplied
+        # HTTP test headers missed the no-referrer/Origin:null regression.
+        run: |
+          uv run playwright install --with-deps chromium
+          uv run pytest -q
 
       - name: Check Python errors
         # The rewrite fixes legacy formatting incrementally, while all concrete
