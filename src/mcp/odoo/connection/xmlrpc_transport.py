@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class XmlRpcTransportClient(BaseTransportClient):
     """XML-RPC transport backend for Odoo 18 and below.
 
-    This is the broad-compatibility path and remains the default transport.
+    This is the compatibility path selected by older database connections.
     It preserves the old object-service calling convention: positional args plus
     a keyword-argument mapping passed to ``execute_kw``.
     """
@@ -76,7 +76,7 @@ class XmlRpcTransportClient(BaseTransportClient):
         if major is not None and major >= 19:
             raise ConnectionError(
                 f"Odoo {version_text or major} detected. XML-RPC is only allowed for Odoo 18 and below. "
-                "Set ODOO_TRANSPORT=json2."
+                "Configure this connection for Odoo 19 or above (JSON-2)."
             )
 
         self._uid = uid

@@ -70,7 +70,7 @@ class Json2TransportClient(BaseTransportClient):
         if major is not None and major <= 18:
             raise ConnectionError(
                 f"Odoo {version_text or major} detected. JSON-2 is only allowed for Odoo 19 and above. "
-                "Set ODOO_TRANSPORT=xmlrpc."
+                "Configure this connection for Odoo 18 or below (XML-RPC)."
             )
 
         # JSON-2 identifies the caller through the bearer token itself. The docs

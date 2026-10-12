@@ -59,7 +59,7 @@ class OdooCredentials:
     db: str        # e.g. mydb
     username: str  # e.g. jente@mydb.com
     api_key: str   # Odoo API key (Settings > API Keys)
-    transport: str | None = None  # Older local entries still use the extension setting.
+    transport: str | None = None  # Unspecified connections default to Odoo 19 / JSON-2.
 
     def __repr__(self) -> str:
         """Never expose credentials in logs or repr."""

@@ -84,7 +84,7 @@ Add the generated client snippet from `dist/client-configs/` to your local MCP c
 In Claude Desktop (macOS or Windows), ask **"Create an Odoo connection"**.
 Claude calls `odoo_setup_credentials` and provides a link to a form on your own
 computer. Open that link in your browser and enter the Odoo URL, database name,
-login email, major version, and API key. Enter the key only in the form, never in
+login email, major version (defaults to 19), and API key or password. Enter the secret only in the form, never in
 chat. The form authenticates before saving and selects XML-RPC for Odoo 18 and
 below or JSON-2 for Odoo 19 and above.
 
@@ -97,10 +97,11 @@ the extension. If it has expired, ask Claude to create a new connection.
 Repeat the flow to add another database; previously saved databases are retained.
 Ask Claude to list connections with `odoo_list_databases` and select one with
 `odoo_switch_database`. Each browser-created database retains its validated
-transport, so an Odoo 18 and Odoo 19 database can coexist. The most recently
+transport, so an Odoo 13 and Odoo 19 database can coexist. The most recently
 saved/explicitly selected database is the durable default. Browser onboarding
 does not enable writes or self-update. The **Configure** extension button controls
-transport and policy settings; it is not the browser login form.
+write and self-update policy settings; transport is configured for each connection
+in the browser form, not in the extension's global settings.
 
 If browser setup is unavailable, run the terminal fallback in the same
 operating-system user account as the MCP server:
@@ -120,17 +121,25 @@ principal-bound provider; they must not reuse a local account's browser flow.
 - Odoo 18 and below: `xmlrpc`
 - Odoo 19 and above: `json2`
 
-The Claude extension's **Odoo transport** setting supplies the fallback for older
-local entries without a saved transport. Its default is `xmlrpc`; select `json2`
-for an older Odoo 19 entry and restart the extension. Browser-created connections
-save their own version-appropriate transport. Generated client templates preserve
-`${user_config.odoo_transport}` and the write/self-update user settings. For a
-client without `user_config` interpolation, replace these placeholders with your
-chosen values before use (`xmlrpc` or `json2` for transport; `false` for writes
-and self-update unless explicitly enabled).
-Terminal onboarding validates with the declared version's transport but does not
-persist that selection in the legacy credential file, so configure the launcher
-as well. Explicit profile-bound clients retain their own transport selection.
+Transport belongs to each saved connection. In the connection form or terminal
+setup, enter **13** for the older database and **19** for the newer database.
+Both flows validate and save the selected transport. If the version or saved
+transport is unspecified, Odoo 19 / `json2` is the default. Inherited
+`ODOO_TRANSPORT` values no longer override database connections.
+
+For Odoo 13, enter the account's local Odoo password in the form; API keys were
+introduced in Odoo 14. For Odoo Online 13, a local password may need to be set
+on that database user separately from the Odoo Online account login.
+See [Odoo 13 authentication](https://www.odoo.com/documentation/13.0/developer/api/odoo.html).
+
+Existing entries that already contain a transport keep it. For an older entry
+without a saved transport, run connection setup again with the correct Odoo
+version to validate and save it. This is necessary for pre-19 connections that
+previously depended on the extension's global selector.
+
+Generated client templates retain the configurable write/self-update policy
+references. Clients without `user_config` interpolation should replace those
+references with their chosen values (`false` unless explicitly enabled).
 
 `json2` requires an Odoo API key and has its own supported-method boundaries. Select the transport as part of the profile; do not rely on a global transport setting when multiple profiles are in use.
 

@@ -178,13 +178,19 @@ class LocalBrowserOnboardingProvider:
             length = int(request.headers["Content-Length"])
             if not 0 < length <= 16384:
                 raise ValueError
-            fields = parse_qs(request.rfile.read(length).decode("utf-8"), strict_parsing=True, max_num_fields=6)
-            if set(fields) != {"csrf", "url", "db", "username", "major", "api_key"}:
+            fields = parse_qs(
+                request.rfile.read(length).decode("utf-8"),
+                strict_parsing=True,
+                keep_blank_values=True,
+                max_num_fields=6,
+            )
+            required = {"csrf", "url", "db", "username", "api_key"}
+            if not required <= set(fields) or set(fields) - required - {"major"}:
                 raise ValueError
             if any(len(values) != 1 for values in fields.values()):
                 raise ValueError
             values = {key: value[0].strip() for key, value in fields.items()}
-            if not all(values.values()):
+            if not all(values[key] for key in required):
                 raise ValueError
         except (ValueError, UnicodeError, OSError):
             self._reply(request, 400, "Complete all fields with valid values.")
@@ -229,7 +235,7 @@ class LocalBrowserOnboardingProvider:
         client = None
         ready = False
         try:
-            transport = transport_for_odoo_major(int(values["major"]))
+            transport = transport_for_odoo_major(int(values.get("major") or "19"))
             url = values["url"].rstrip("/")
             parsed = urlsplit(url)
             # No credentials in URLs and no clear-text non-local HTTP targets.
@@ -299,7 +305,10 @@ button{{padding:.8rem 1.2rem}}</style><h1>Connect your Odoo database</h1>
 <label>Odoo URL<input name="url" type="url" placeholder="https://yourcompany.odoo.com" required></label>
 <label>Database name<input name="db" required></label>
 <label>Login email<input name="username" type="email" autocomplete="username" required></label>
-<label>Odoo major version<input name="major" type="number" min="1" placeholder="18 or 19" required></label>
-<label>API key<input name="api_key" type="password" autocomplete="off" required></label>
+<label>Odoo major version<input name="major" type="number" min="1" value="19"></label>
+<p>Transport is saved for this connection: XML-RPC for Odoo 18 and below, JSON-2 for Odoo 19+.
+If you leave the version blank, Odoo 19 is assumed.</p>
+<label>API key or Odoo password<input name="api_key" type="password" autocomplete="off" required></label>
+<p>For Odoo 13, use your Odoo password. For Odoo 14+, use an API key.</p>
 <p>Your connection will be checked before saving. Creating a connection does not enable writes.</p>
 <button type="submit">Verify and connect</button></form></html>'''

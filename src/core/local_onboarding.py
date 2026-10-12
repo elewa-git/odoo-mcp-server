@@ -47,7 +47,7 @@ async def onboard_local_terminal(
     getpass_fn: TerminalSecretInput = getpass.getpass,
     output_fn: TerminalOutput = print,
     client_factory: Callable[..., OdooClient] = OdooClient,
-    store_credentials: Callable[[str, str, str, str], None] = store_odoo_credentials_file,
+    store_credentials: Callable[..., None] = store_odoo_credentials_file,
 ) -> LocalOnboardingResult | None:
     """Validate terminal-entered credentials before using the legacy local store.
 
@@ -59,10 +59,11 @@ async def onboard_local_terminal(
     url = input_fn("Odoo URL (for example https://my.odoo.com): ").strip().rstrip("/")
     db = input_fn("Odoo database name: ").strip()
     username = input_fn("Odoo login email: ").strip()
-    major_text = input_fn("Odoo major version: ").strip()
+    major_text = input_fn("Odoo major version [19]: ").strip()
 
     try:
-        odoo_major = int(major_text)
+        # An omitted version belongs to this connection and targets Odoo 19.
+        odoo_major = int(major_text or "19")
         transport = transport_for_odoo_major(odoo_major)
     except ValueError:
         output_fn("Odoo major version must be a positive integer.")
@@ -74,22 +75,16 @@ async def onboard_local_terminal(
         "::1",
         "localhost",
     }
-    if (
-        (parsed_url.scheme != "https" and not is_loopback_http)
-        or not parsed_url.netloc
-        or not db
-        or not username
-    ):
-        output_fn(
-            "URL, database name, and login email are required; use HTTPS or local loopback HTTP."
-        )
+    if (parsed_url.scheme != "https" and not is_loopback_http) or not parsed_url.netloc or not db or not username:
+        output_fn("URL, database name, and login email are required; use HTTPS or local loopback HTTP.")
         return None
 
     # getpass reads from the terminal without echoing; do not move this value
     # into a model, result object, exception, or terminal message.
-    api_key = getpass_fn("Odoo API key (input hidden): ").strip()
+    secret_label = "Odoo password" if odoo_major < 14 else "Odoo API key"
+    api_key = getpass_fn(f"{secret_label} (input hidden): ").strip()
     if not api_key:
-        output_fn("An Odoo API key is required.")
+        output_fn(f"{secret_label} is required.")
         return None
 
     credentials = OdooCredentials(url=url, db=db, username=username, api_key=api_key)
@@ -123,7 +118,9 @@ async def onboard_local_terminal(
     try:
         # This legacy JSON persistence call enforces mode 0600. It is reached
         # only after authentication, so a failed onboarding cannot alter state.
-        store_credentials(credentials.url, credentials.db, credentials.username, credentials.api_key)
+        store_credentials(
+            credentials.url, credentials.db, credentials.username, credentials.api_key, transport=transport
+        )
     except Exception:
         output_fn("Validated credentials could not be saved locally.")
         return None
