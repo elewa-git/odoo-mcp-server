@@ -1,7 +1,7 @@
 {
   "name": "odoo-mcp-server",
   "description": "Odoo MCP server for CRM, projects, and safe staged write operations.",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "mcpServers": {
     "odoo": {
       "command": "uvx",

@@ -290,7 +290,13 @@ All writes go through staged validation and execution gates. **Never bypass this
 Use the secure local loopback/CLI onboarding flow, or the OpenCrane profile onboarding flow for Cowork.
 ```
 
-For local stdio, run `odoo-mcp-onboard`; the current transitional fallback writes the validated key to the existing owner-only local file. For Cowork, credentials must remain in the selected user's OpenCrane-backed custody. Do not paste an API key into chat to repair either path.
+For local stdio, ask Claude to create an Odoo connection. It returns a local browser
+form for credential entry and can check completion before running `odoo_ping`.
+Existing databases are retained; use `odoo_list_databases` and `odoo_switch_database`
+to select among them. `odoo-mcp-onboard` remains a terminal fallback. Both flows
+save validated credentials in the owner-only local file. For Cowork, credentials
+must remain in the selected user's OpenCrane-backed custody. Do not paste an API
+key into chat to repair either path.
 
 ### "Odoo authentication failed"
 

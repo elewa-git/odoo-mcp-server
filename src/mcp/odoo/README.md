@@ -8,7 +8,9 @@ Streamable HTTP endpoint, verified principal adapter, and credential custody.
 ## Authority boundaries
 
 - Tool arguments never carry Odoo API keys. Credential onboarding happens in
-  an out-of-band provider flow or the local `odoo-mcp-onboard` terminal fallback.
+  the local loopback browser form or the `odoo-mcp-onboard` terminal fallback.
+  `odoo_setup_credentials` starts the form and polls its non-secret status;
+  completion refreshes the selected connection without restarting the server.
 - A verified principal owns one or more Odoo profiles. Profile metadata is
   non-secret; credential material stays behind `CredentialProvider`.
 - Odoo 18 and below uses XML-RPC. Odoo 19 and above uses JSON-2. A profile-bound
