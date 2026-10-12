@@ -94,6 +94,26 @@ After saving, return to Claude and say **"Check the connection"**. Claude polls
 The setup link expires after ten minutes and only works on the computer running
 the extension. If it has expired, ask Claude to create a new connection.
 
+If the page shows **Request rejected**, reopen the link and submit from that
+page. Ask Claude to call `odoo_setup_credentials` with `restart: true` if the
+session is stuck; this cancels only pending setup and issues a fresh form.
+Polling a cancelled request returns `failure_code: cancelled`.
+
+Use the database **instance URL**, such as `https://your-database.odoo.com` or
+your instance's custom domain, not the Odoo.sh dashboard/backups URL at
+`www.odoo.sh/project/...`. An Odoo.sh database name and instance URL are distinct.
+Rejected URLs return `invalid_url`; authentication failures return
+`authentication_failed`; local save failures return `storage_failed`.
+These codes also appear on the page without echoing entered secrets or Odoo
+response bodies. Re-run setup after correcting the reported problem.
+
+Credentials are stored locally at `Path.home() / ".config/odoo-mcp/credentials.json"`
+(Windows: `%USERPROFILE%\.config\odoo-mcp\credentials.json`; macOS:
+`~/.config/odoo-mcp/credentials.json`). `credential_custody: provider` describes
+the onboarding adapter interface, not hosted storage. Local stdio now also
+reports `credential_storage: local_file`. It does not upload credentials to a
+relay. Existing database entries are preserved.
+
 Repeat the flow to add another database; previously saved databases are retained.
 Ask Claude to list connections with `odoo_list_databases` and select one with
 `odoo_switch_database`. Each browser-created database retains its validated
@@ -109,6 +129,26 @@ operating-system user account as the MCP server:
 ```bash
 odoo-mcp-onboard
 ```
+
+For a Claude MCPB installation, use the installed bundle's code instead of
+installing a potentially different package from PyPI:
+
+Windows PowerShell:
+
+```powershell
+uv run --directory "$env:APPDATA\Claude\Claude Extensions\local.mcpb.elewa.odoo-mcp-server" python -m src.core.local_onboarding
+```
+
+macOS Terminal:
+
+```bash
+uv run --directory "$HOME/Library/Application Support/Claude/Claude Extensions/local.mcpb.elewa.odoo-mcp-server" python -m src.core.local_onboarding
+```
+
+Run as the same OS user as Claude; the fallback writes to the same local
+credential file. If `uv` is not on PATH, use its executable path shown in the
+extension's server settings. Restart the extension after terminal setup, then
+ask Claude to run `odoo_ping`.
 
 On Windows PowerShell, the command is the same after `uv tool install`. Normal profile metadata is entered as terminal text; the API key is read with hidden `getpass` input, authenticated, and only then written to the existing owner-only legacy credentials file. This file adapter is transitional while OS credential-store support is implemented.
 

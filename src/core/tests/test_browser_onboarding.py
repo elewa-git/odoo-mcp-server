@@ -2,17 +2,19 @@
 
 import asyncio
 import json
+import os
 import re
 from datetime import timedelta
 
 import httpx
 import pytest
+from playwright.async_api import async_playwright
 
 from mcp import Client
 from src.core import browser_onboarding, credentials
 from src.core.browser_onboarding import LocalBrowserOnboardingProvider
 from src.core.identity import LocalInstallationPrincipalProvider
-from src.core.onboarding import OnboardingStatus, OnboardingUnavailableError
+from src.core.onboarding import OnboardingFailureCode, OnboardingStatus, OnboardingUnavailableError
 from src.mcp.odoo import server
 
 
@@ -51,8 +53,8 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "0")
 
 
-async def submit(http, url, *, db="demo", major="19", **overrides):
-    form = await http.get(url)
+async def submit(http, form_url, *, db="demo", major="19", **overrides):
+    form = await http.get(form_url)
     assert form.status_code == 200
     csrf = re.search(r'name="csrf" value="([^"]+)"', form.text).group(1)
     fields = dict(
@@ -66,7 +68,7 @@ async def submit(http, url, *, db="demo", major="19", **overrides):
     fields.update(overrides)
     if major is None:
         fields.pop("major")
-    return await http.post(url, data=fields, headers={"Origin": str(httpx.URL(url).copy_with(path=""))})
+    return await http.post(form_url, data=fields, headers={"Origin": str(httpx.URL(form_url).copy_with(path=""))})
 
 
 @pytest.mark.asyncio
@@ -142,6 +144,8 @@ async def test_auth_failure_preserves_profiles_and_never_echoes_secret(isolated,
         assert "synthetic-secret-key" not in response.text
         result = await provider.get_result(principal, flow.onboarding_id)
         assert result.status is OnboardingStatus.FAILED
+        assert result.failure_code is OnboardingFailureCode.AUTHENTICATION_FAILED
+        assert "authentication_failed" in response.text
         assert credentials.CONFIG_PATH.read_bytes() == previous
         assert "synthetic-secret-key" not in json.dumps(result.to_public_dict())
         assert "synthetic-secret-key" not in str(capsys.readouterr())
@@ -185,5 +189,96 @@ async def test_browser_defaults_blank_or_absent_version_to_odoo_19(isolated, maj
         async with httpx.AsyncClient(trust_env=False) as http:
             assert (await submit(http, flow.url, major=major)).status_code == 200
         assert credentials.get_odoo_credentials("demo").transport == "json2"
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_browser_submission_stores_locally_without_synthetic_origin_header(isolated):
+    principal = await LocalInstallationPrincipalProvider("test").resolve()
+    provider = LocalBrowserOnboardingProvider(principal)
+    try:
+        flow = await provider.begin(principal)
+        async with async_playwright() as playwright:
+            # CI uses bundled Chromium; local QA may supply installed Chrome.
+            # Always use a new headless context, never a personal browser profile.
+            browser = await playwright.chromium.launch(
+                headless=True,
+                executable_path=os.environ.get("ODOO_MCP_TEST_BROWSER_EXECUTABLE"),
+            )
+            try:
+                page = await browser.new_page()
+                await page.goto(flow.url)
+                for name, value in dict(
+                    url="https://example.odoo.com",
+                    db="browser-db",
+                    username="test@example.com",
+                    api_key="synthetic-key",
+                ).items():
+                    await page.locator(f'[name="{name}"]').fill(value)
+                # The browser generates Origin under the page's referrer policy.
+                # Supplying this header manually would hide the original bug.
+                async with page.expect_navigation():
+                    await page.get_by_role("button", name="Verify and connect").click()
+                assert "Connection saved" in await page.locator("body").inner_text()
+            finally:
+                await browser.close()
+        assert (await provider.get_result(principal, flow.onboarding_id)).status is OnboardingStatus.READY
+        assert credentials.get_odoo_credentials("browser-db").transport == "json2"
+        assert credentials.CONFIG_PATH.stat().st_mode & 0o777 == 0o600
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_null_origin_stays_rejected_and_mcp_can_restart_pending_flow(isolated):
+    async with Client(server.mcp, mode="legacy") as mcp:
+        begin = (await mcp.call_tool("odoo_setup_credentials", {"input": {}})).structured_content
+        async with httpx.AsyncClient(trust_env=False) as http:
+            response = await http.post(begin["url"], data={"api_key": "synthetic-key"}, headers={"Origin": "null"})
+            assert response.status_code == 403
+            assert "request_rejected" in response.text
+            fresh = (await mcp.call_tool("odoo_setup_credentials", {"input": {"restart": True}})).structured_content
+            assert fresh["onboarding_id"] != begin["onboarding_id"]
+            assert (await http.get(begin["url"])).status_code == 410
+            assert (await submit(http, fresh["url"])).status_code == 200
+        previous = (
+            await mcp.call_tool(
+                "odoo_setup_credentials",
+                {
+                    "input": {"onboarding_id": begin["onboarding_id"]},
+                },
+            )
+        ).structured_content
+        assert previous["failure_code"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["url", "storage"])
+async def test_invalid_dashboard_url_and_storage_failures_have_bounded_codes(isolated, failure):
+    principal = await LocalInstallationPrincipalProvider("test").resolve()
+
+    def reject_storage(*args, **kwargs):
+        raise PermissionError("synthetic-key private response")
+
+    provider = LocalBrowserOnboardingProvider(
+        principal, store_credentials=reject_storage if failure == "storage" else None
+    )
+    try:
+        flow = await provider.begin(principal)
+        async with httpx.AsyncClient(trust_env=False) as http:
+            response = await submit(
+                http,
+                flow.url,
+                url="https://www.odoo.sh/project/demo/branches/main/backups"
+                if failure == "url"
+                else "https://example.odoo.com",
+            )
+        result = await provider.get_result(principal, flow.onboarding_id)
+        expected = "invalid_url" if failure == "url" else "storage_failed"
+        assert result.failure_code.value == expected
+        assert expected in response.text
+        assert "synthetic-key" not in response.text
+        assert not credentials.CONFIG_PATH.exists()
     finally:
         await provider.close()

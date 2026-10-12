@@ -135,13 +135,29 @@ class LocalBrowserOnboardingProvider:
                 raise OnboardingUnavailableError("Unknown onboarding request.")
             return flow.result
 
+    async def restart(self, principal: Principal) -> OnboardingContinuation:
+        self._authorize(principal)
+        with self._lock:
+            for flow in self._flows.values():
+                if flow.result.status is OnboardingStatus.PENDING:
+                    # Mark in-flight authentication cancelled too; its save fence
+                    # below prevents a replaced form from activating credentials.
+                    flow.result = OnboardingResult(
+                        flow.continuation.onboarding_id,
+                        OnboardingStatus.FAILED,
+                        failure_code=OnboardingFailureCode.CANCELLED,
+                    )
+        return await self.begin(principal)
+
     def _reply(self, request: BaseHTTPRequestHandler, status: int, body: str) -> None:
         content = body.encode("utf-8")
         request.send_response(status)
         request.send_header("Content-Type", "text/html; charset=utf-8")
         request.send_header("Content-Length", str(len(content)))
         request.send_header("Cache-Control", "no-store")
-        request.send_header("Referrer-Policy", "no-referrer")
+        # Chrome turns same-origin form POST Origin into "null" under no-referrer.
+        # Keep the real local Origin while still suppressing cross-origin referrers.
+        request.send_header("Referrer-Policy", "same-origin")
         request.send_header("X-Content-Type-Options", "nosniff")
         request.send_header(
             "Content-Security-Policy",
@@ -172,7 +188,13 @@ class LocalBrowserOnboardingProvider:
                 or len(request.headers.get_all("Content-Length", [])) != 1
                 or request.headers.get_content_type() != "application/x-www-form-urlencoded"
             ):
-                self._reply(request, 403, "Submit the form from this setup page.")
+                self._reply(
+                    request,
+                    403,
+                    "Request rejected (request_rejected). "
+                    "Reopen the setup link and submit from that page. "
+                    "If it still fails, ask Claude to restart connection setup.",
+                )
                 return
         try:
             length = int(request.headers["Content-Length"])
@@ -222,29 +244,43 @@ class LocalBrowserOnboardingProvider:
             ready = False
         finally:
             values.clear()
+        with self._lock:
+            result = flow.result
+        reason = result.failure_code.value if result.failure_code else "request_rejected"
+        messages = {
+            "invalid_url": "Enter your Odoo database instance URL, not an Odoo.sh dashboard URL.",
+            "authentication_failed": "Authentication failed. Check the login, secret, database, and Odoo version.",
+            "storage_failed": "Authentication succeeded, but local credentials could not be saved. "
+            "Check local file permissions.",
+        }
         self._reply(
             request,
             200 if ready else 400,
             "Connection saved. Return to Claude and ask it to check the connection. You can close this tab."
             if ready
-            else "Connection could not be saved. Check your details and Odoo version, "
-            "then ask Claude to start setup again.",
+            else f"Connection could not be saved ({reason}). "
+            + messages.get(reason, "Check the connection details.")
+            + " Ask Claude to start setup again.",
         )
 
     async def _complete(self, onboarding_id: str, values: dict[str, str]) -> bool:
         client = None
         ready = False
+        failure = OnboardingFailureCode.VALIDATION_FAILED
         try:
             transport = transport_for_odoo_major(int(values.get("major") or "19"))
             url = values["url"].rstrip("/")
             parsed = urlsplit(url)
+            failure = OnboardingFailureCode.INVALID_URL
             # No credentials in URLs and no clear-text non-local HTTP targets.
             if (
                 not parsed.netloc
-                or parsed.username
-                or parsed.password
+                or parsed.username is not None
+                or parsed.password is not None
                 or parsed.query
                 or parsed.fragment
+                or parsed.hostname in {"odoo.sh", "www.odoo.sh"}
+                or parsed.path not in {"", "/"}
                 or (
                     parsed.scheme != "https"
                     and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})
@@ -252,6 +288,7 @@ class LocalBrowserOnboardingProvider:
             ):
                 raise ValueError
             credentials = OdooCredentials(url, values["db"], values["username"], values["api_key"])
+            failure = OnboardingFailureCode.AUTHENTICATION_FAILED
             client = self._client_factory(credentials=credentials, transport=transport)
             await client.authenticate()
             with self._lock:
@@ -260,6 +297,7 @@ class LocalBrowserOnboardingProvider:
                     return False
                 # Persist only authenticated credentials and their per-database
                 # transport, so a restart cannot revert an Odoo 19 profile to XML-RPC.
+                failure = OnboardingFailureCode.STORAGE_FAILED
                 self._store_credentials(
                     url, credentials.db, credentials.username, credentials.api_key, transport=transport
                 )
@@ -273,9 +311,7 @@ class LocalBrowserOnboardingProvider:
             with self._lock:
                 flow = self._flow(onboarding_id)
                 if flow and flow.result.status is OnboardingStatus.PENDING:
-                    flow.result = OnboardingResult(
-                        onboarding_id, OnboardingStatus.FAILED, failure_code=OnboardingFailureCode.VALIDATION_FAILED
-                    )
+                    flow.result = OnboardingResult(onboarding_id, OnboardingStatus.FAILED, failure_code=failure)
         finally:
             if client is not None:
                 try:
